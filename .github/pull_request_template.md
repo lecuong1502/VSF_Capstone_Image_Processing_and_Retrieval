@@ -1,21 +1,21 @@
-## Mô tả
+## Summary
 
-<!-- Thay đổi gì và tại sao? Tóm tắt ngắn gọn. -->
+<!-- What does this PR change and why? Keep it short. -->
 
 Closes #
 
-## Loại thay đổi
+## Type of change
 
-- [ ] `feat` – Tính năng mới
-- [ ] `fix` – Sửa lỗi
-- [ ] `perf` – Cải thiện hiệu năng
-- [ ] `refactor` – Tái cấu trúc, không đổi hành vi
-- [ ] `exp` – Thí nghiệm / bake-off model
-- [ ] `docs` – Tài liệu
-- [ ] `build` / `ci` / `chore` – Build, CI/CD, dependency
-- [ ] ⚠️ Breaking change (schema, API, định dạng index/snapshot)
+- [ ] `feat` – New feature
+- [ ] `fix` – Bug fix
+- [ ] `perf` – Performance improvement
+- [ ] `refactor` – No behavior change
+- [ ] `exp` – Experiment / model bake-off
+- [ ] `docs` – Documentation
+- [ ] `build` / `ci` / `chore` – Build, CI/CD, dependencies
+- [ ] ⚠️ Breaking change (schema, API, index/snapshot format)
 
-## Thành phần bị ảnh hưởng
+## Affected components
 
 - [ ] `apps/web`
 - [ ] `services/gateway`
@@ -25,53 +25,58 @@ Closes #
 - [ ] `deploy` / CI
 - [ ] `docs`
 
-## Task roadmap & tiêu chí nghiệm thu
+## Acceptance criteria
 
-<!-- Nếu PR thuộc roadmap (mục 10 tài liệu thiết kế), ghi số task và tiêu chí. Xoá nếu không áp dụng. -->
+<!-- Copy the checklist from the linked issue and tick what is done. -->
 
-- Task #:
-- Tiêu chí nghiệm thu:
-- Kết quả:
+- [ ]
 
-## Cách kiểm tra
+## How to test
 
-<!-- Các bước để reviewer tái hiện/kiểm tra. -->
+<!-- Steps for the reviewer to reproduce / verify. -->
 
 ```bash
 
 ```
 
-## Kết quả đánh giá / benchmark
+## Evaluation / benchmark results
 
-<!-- Bắt buộc nếu thay đổi model, ngưỡng, router, rerank, prompt, index hoặc hiệu năng. Xoá nếu không áp dụng. -->
+<!-- Required when changing models, thresholds, router, reranker, prompts, index or performance. Delete if not applicable. -->
 
-| Chỉ số | Trước | Sau |
+| Metric | Before | After |
 |---|---|---|
 | | | |
 
 <!--
-Gợi ý chỉ số:
-- Kiểm duyệt: P/R/F1 (CI 95%), precision(pass), tỉ lệ escalation
-- Truy xuất: nDCG@10, Recall@k, MRR theo single / multi-intent / multi-hop
-- Hiệu năng: p50/p95 (k6), QPS, ảnh/s, kích thước Docker image
-Ghi kèm: seed, phiên bản model, commit SHA, phần cứng.
+Suggested metrics:
+- Moderation: P/R/F1 (95% CI), precision(pass), escalation rate
+- Retrieval: nDCG@10, Recall@k, MRR@10 per single / multi-intent / multi-hop / negative
+- Performance: p50/p95/p99 (k6), QPS, images/s, Docker image size
+Also record: seed, model version, commit SHA, hardware.
 -->
 
-## Ảnh chụp màn hình
+## Cost
 
-<!-- Với thay đổi UI. Xoá nếu không áp dụng. -->
+<!-- Required for PRs that call Gemini. Delete if not applicable. -->
+
+- Tokens (in / out):
+- Spend (USD):
+
+## Screenshots
+
+<!-- For UI changes. Delete if not applicable. -->
 
 ## Checklist
 
-- [ ] Đã đọc `CONTRIBUTING.md`
-- [ ] Tiêu đề PR theo Conventional Commits (`type(scope): mô tả`)
-- [ ] `make lint test` xanh ở local
-- [ ] Đã thêm/cập nhật test cho logic thay đổi
-- [ ] Đã cập nhật tài liệu liên quan (README, `docs/`, `.env.example`)
-- [ ] Không commit bí mật, dữ liệu thô, ảnh hoặc weights model
-- [ ] Dependency mới (nếu có) đã được khai báo và cập nhật lockfile
-- [ ] Không làm vượt ngân sách latency (p95 < 3s) hoặc kích thước image
+- [ ] I have read `CONTRIBUTING.md`
+- [ ] PR title follows Conventional Commits (`type(scope): summary`)
+- [ ] `make lint test` passes locally
+- [ ] Tests added/updated for changed logic
+- [ ] Docs updated where relevant (README, `docs/`, `.env.example`)
+- [ ] No secrets, raw data, images or model weights committed
+- [ ] New dependencies declared and lockfile updated
+- [ ] Latency budget (p95 < 3 s) and image size budgets still met
 
-## Ghi chú cho reviewer
+## Notes for reviewers
 
-<!-- Điểm cần chú ý, câu hỏi mở, phần chưa xong hoặc việc tiếp theo. -->
+<!-- Points of attention, open questions, follow-ups. -->

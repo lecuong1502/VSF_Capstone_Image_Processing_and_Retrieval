@@ -1,0 +1,42 @@
+# Data & artifacts (never committed – see CONTRIBUTING §7)
+data/*
+!data/sample/
+models/
+reports/
+*.onnx
+*.pt
+*.pth
+*.safetensors
+*.parquet
+*.duckdb
+*.sqlite
+!data/sample/**
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+*.egg-info/
+dist/
+build/
+
+# Go
+services/gateway/bin/
+
+# Node
+node_modules/
+apps/web/dist/
+
+# Editors & OS
+.vscode/
+.idea/
+.DS_Store
