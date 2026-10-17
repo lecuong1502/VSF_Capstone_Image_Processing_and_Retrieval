@@ -1,4 +1,4 @@
-"""Small filesystem helpers shared by the cache and the ledger."""
+"""Small filesystem helpers shared by pipeline steps."""
 
 from __future__ import annotations
 

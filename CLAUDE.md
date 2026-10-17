@@ -45,6 +45,7 @@ make fmt           # ruff, gofmt, prettier
 make requirements  # regenerate requirements.txt files from uv.lock (lint fails if stale)
 make gemini-cost   # Gemini spend per step vs budget (make gemini-smoke: one real ~$0.0001 call)
 make profile       # reports/data_profile.html: verify rates by size/source/query_type/branch/priority (after make ingest)
+make download      # img2dataset → $DATA_DIR/download/{runs/*.tar,image_assets.parquet} + $DATA_DIR/thumbs/*.webp; re-run retries only transient failures
 make ingest        # merge RAW_DATA_DIR CSVs → $DATA_DIR/ingest/{entities,images,labels}.parquet, conflicts.csv, vsf.duckdb
 ```
 

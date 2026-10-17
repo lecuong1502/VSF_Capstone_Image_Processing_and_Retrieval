@@ -123,3 +123,29 @@ def test_profile_has_image_level_distributions() -> None:
     assert profile.distributions["yes_per_entity"]["entities"].sum() == sample.entities.height
     assert {"p05", "p50", "p95"} <= set(profile.short_side_quantiles)
     assert "aspect" in profile.rates
+
+
+def test_download_section_when_assets_exist() -> None:
+    sample = ingest(Path(__file__).resolve().parents[1] / "data" / "sample")
+    ids = sample.images["image_id"].to_list()
+    statuses = ["ok"] * (len(ids) - 3) + ["dead", "blocked", "failed"]
+    domains = sample.images["image_source"].to_list()
+    assets = pl.DataFrame({"image_id": ids, "download_status": statuses})
+
+    profile = build_profile(sample.images, sample.labels, sample.entities, assets)
+    html = render_html(profile)
+
+    assert profile.download is not None
+    assert dict(profile.download["status"].rows())["ok"] == len(ids) - 3
+    assert profile.download["by_domain"]["images"].sum() == len(ids)
+    assert "Download status" in html and "dead-link" in html.lower()
+    assert len(domains) == len(ids)
+
+
+def test_no_download_section_before_download() -> None:
+    sample = ingest(Path(__file__).resolve().parents[1] / "data" / "sample")
+
+    profile = build_profile(sample.images, sample.labels, sample.entities)
+
+    assert profile.download is None
+    assert "Download status" not in render_html(profile)
