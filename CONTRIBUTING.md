@@ -45,14 +45,14 @@ Put new code in the directory of the component it belongs to. If you need a new 
 
 ## 3. Development setup
 
-Requirements: Python 3.12, [uv](https://github.com/astral-sh/uv), Go (latest stable), Node.js LTS, Docker + Docker Compose. An NVIDIA GPU (≥ 6 GB VRAM) is needed for `embed` and `train_heads`.
+Requirements: Python 3.12, [uv](https://github.com/astral-sh/uv), Go (version in `services/gateway/go.mod`), Node.js 22 (`apps/web/.nvmrc`), Docker + Docker Compose. An NVIDIA GPU (≥ 6 GB VRAM) is needed for `embed` and `train_heads`.
 
 ```bash
 git clone https://github.com/lecuong1502/VSF_Capstone_Image_Processing_and_Retrieval.git
 cd VSF_Capstone_Image_Processing_and_Retrieval
 cp .env.example .env          # set RAW_DATA_DIR, GEMINI_API_KEY, ... (never commit .env)
 make setup                    # create .env, install dependencies + pre-commit hooks (ONNX weights arrive with #11)
-make lint test                # must pass before opening a PR
+make lint test build-web      # must pass before opening a PR (same checks as CI)
 ```
 
 Run the stack locally:
@@ -130,7 +130,7 @@ docker compose -f deploy/docker-compose.yml up -d
 
 ## 8. Pull requests & review
 
-1. Make sure `make lint test` passes locally.
+1. Make sure `make lint test build-web` passes locally (the same checks CI runs).
 2. Open a PR against `main` and fill in the [PR template](.github/pull_request_template.md).
 3. Link the issue with `Closes #<number>`.
 4. Keep PRs small (ideally < 400 changed lines excluding lockfiles); split large work.
