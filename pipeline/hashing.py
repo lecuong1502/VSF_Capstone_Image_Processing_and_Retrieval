@@ -4,8 +4,10 @@
   `$DATA_DIR/dedup/pdq.parquet` (re-runs hash only new images or images whose SHA changed);
   candidate pairs up to distance 48 → `pdq_pairs.parquet`; union-find clusters of SHA-equal or
   PDQ-near (Hamming ≤ τ, both hashes of quality ≥ 50) images → `dedup_members.parquet`.
-  The representative is the largest original image (preferring non-watermarked images needs the
-  watermark head, #14). Holds the data lock, so it never runs alongside `make download`.
+  The representative is an image without a brand/logo or phone number if the cluster has one
+  (flags from `dedup/representative_flags.parquet`, written by the watermark head #14 and OCR
+  #16; images without a flag count as clean), then the largest original image. Holds the data
+  lock, so it never runs alongside `make download`.
 - `label-sheet`: 300 non-SHA candidate pairs stratified by distance (bins edged at τ=31) →
   `reports/dedup_pairs.html` (keyboard labeling, CSV export) + `dedup/label_sheet.parquet` with
   each bin's population so precision can be weighted back to the real pair distribution.
@@ -44,7 +46,9 @@ from pipeline.shards import iter_shard_images, split_shard_path
 
 log = logging.getLogger(__name__)
 
-DEFAULT_MAX_DISTANCE = 31  # spec §4.1 starting threshold, tuned on hand-labeled pairs
+# Tuned on 300 hand-labeled pairs (spec §4.1 started at 31): population-weighted precision is
+# 0.980 at 31 and 0.978 at 48, the widest labeled distance.
+DEFAULT_MAX_DISTANCE = 48
 DEFAULT_MIN_QUALITY = 50  # PDQ's own guidance: hashes of flat images below this are unreliable
 CANDIDATE_DISTANCE = 48  # candidate pairs kept beyond τ so labels can move τ up
 # Bin edges (lo, hi]; -1 so distance 0 falls in the first bin; 31 = default τ is an edge.
@@ -144,7 +148,9 @@ def candidate_pairs(hashes: pl.DataFrame, max_distance: int, min_quality: int) -
 def cluster(hashes: pl.DataFrame, pairs: pl.DataFrame, max_distance: int) -> pl.DataFrame:
     """Union-find clusters of SHA-equal images and `pairs` within `max_distance`.
 
-    `hashes` has image_id, sha256, pdq_hash, area. Returns members of clusters with ≥ 2 images:
+    `hashes` has image_id, sha256, pdq_hash, area and optionally has_brand_or_phone (the
+    representative avoids flagged images, then is the largest). Returns members of clusters
+    with ≥ 2 images:
     cluster_id (= representative's image_id), method ("representative"; "sha256" if identical to
     the representative; otherwise "pdq"), distance to the representative, is_representative.
     """
@@ -180,12 +186,17 @@ def cluster(hashes: pl.DataFrame, pairs: pl.DataFrame, max_distance: int) -> pl.
     for i in range(len(ids)):
         groups[find(i)].append(i)
     areas = hashes["area"].fill_null(0).to_list()
+    flagged = (
+        hashes["has_brand_or_phone"].fill_null(False).to_list()
+        if "has_brand_or_phone" in hashes.columns
+        else [False] * len(ids)
+    )
     pdqs = hashes["pdq_hash"].to_list()
     rows = []
     for members in groups.values():
         if len(members) < 2:
             continue
-        rep = max(members, key=lambda i: (areas[i], -ids[i]))
+        rep = max(members, key=lambda i: (not flagged[i], areas[i], -ids[i]))
         for i in members:
             distance: int | None
             if i == rep:
@@ -248,6 +259,10 @@ def _run_hashing(
         ),
         on="image_id",
     )
+    flags_path = out_dir / "representative_flags.parquet"
+    if flags_path.exists():
+        flags = pl.read_parquet(flags_path).select("image_id", "has_brand_or_phone")
+        hashes = hashes.join(flags, on="image_id", how="left")
     pairs = candidate_pairs(hashes, CANDIDATE_DISTANCE, min_quality)
     atomic_write(out_dir / "pdq_pairs.parquet", pairs.write_parquet)
     members = cluster(hashes, pairs, max_distance)

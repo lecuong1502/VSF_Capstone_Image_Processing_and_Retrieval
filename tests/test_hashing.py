@@ -251,7 +251,7 @@ def data_dir(tmp_path: Path) -> Path:
 
 
 def test_run_hashing_end_to_end(data_dir: Path) -> None:
-    summary = run_hashing(data_dir, max_distance=31, min_quality=50, processes=1)
+    summary = run_hashing(data_dir, max_distance=48, min_quality=50, processes=1)
 
     assets = pl.read_parquet(data_dir / "download" / "image_assets.parquet")
     hashed = dict(assets.select("image_id", "pdq_hash").rows())
@@ -285,3 +285,35 @@ def test_run_hashing_rehashes_only_new_or_changed_images(data_dir: Path) -> None
 def test_run_hashing_refuses_to_run_during_a_download(data_dir: Path) -> None:
     with exclusive_lock(data_dir / "download" / ".lock"), pytest.raises(LockedError):
         run_hashing(data_dir, processes=1)
+
+
+def test_representative_prefers_images_without_brand_or_phone() -> None:
+    hashes = pl.DataFrame(
+        {
+            "image_id": [1, 2, 3],
+            "sha256": ["a", "b", "c"],
+            "pdq_hash": ["00" * 32, NEAR, NEAR],
+            "pdq_quality": [100, 100, 100],
+            "area": [1000, 500, 200],
+            # 1 is the largest but shows a logo; 2 has a phone number; 3 is clean.
+            "has_brand_or_phone": [True, True, False],
+        }
+    )
+    pairs = candidate_pairs(hashes, max_distance=48, min_quality=50)
+
+    members = cluster(hashes, pairs, max_distance=31)
+
+    reps = members.filter(pl.col("is_representative"))["image_id"].to_list()
+    assert reps == [3]
+
+
+def test_unknown_flags_count_as_clean(data_dir: Path) -> None:
+    flags = pl.DataFrame({"image_id": [1], "has_brand_or_phone": [True]})
+    (data_dir / "dedup").mkdir(exist_ok=True)
+    flags.write_parquet(data_dir / "dedup" / "representative_flags.parquet")
+
+    run_hashing(data_dir, processes=1)
+
+    members = pl.read_parquet(data_dir / "dedup" / "dedup_members.parquet")
+    # 1 (larger, flagged) and 2 (smaller, no flag) are near-duplicates: 2 is kept.
+    assert members.filter(pl.col("is_representative"))["image_id"].to_list() == [2]
