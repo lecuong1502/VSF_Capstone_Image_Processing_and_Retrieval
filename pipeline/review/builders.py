@@ -97,7 +97,7 @@ def relevance_queue(data_dir: Path, *, n: int, seed: int, blind: bool) -> list[I
         items.append(
             Item(
                 item_id=f"{row['image_id']}:{row['entity_id']}",
-                mode="moderation",
+                mode="relevance",
                 title=str(entity["entity_name"]),
                 image_id=row["image_id"],
                 entity_id=row["entity_id"],
@@ -169,7 +169,7 @@ def kg_queue(data_dir: Path, edges_path: Path, *, n: int, seed: int) -> list[Ite
                 entity_id=src if src in entities else None,
                 context=context,
                 references=(refs.get(src, []) + refs.get(dst, []))[:N_REFERENCES],
-                ref={"src": src, "rel": rel, "dst": dst},
+                export_keys={"src": src, "rel": rel, "dst": dst},
                 fields=[yes_no("edge_correct", "Cạnh đúng?")],
             )
         )
@@ -188,10 +188,13 @@ def qrels_queue(qrels_path: Path, queries_path: Path, *, fraction: float, seed: 
         q["qid"]: q
         for q in (json.loads(line) for line in queries_path.read_text().splitlines() if line)
     }
+    missing = set(qrels["qid"]) - set(queries)
+    if missing:
+        raise ValueError(f"{len(missing)} qids in {qrels_path} are not in {queries_path}")
     n = round(fraction * qrels.height)
     items = []
     for row in _sample(qrels, n, seed, ["qid", "image_id"]).iter_rows(named=True):
-        query = queries[row["qid"]]
+        query = queries[row["qid"]]  # checked above
         items.append(
             Item(
                 item_id=f"{row['qid']}:{row['image_id']}",
@@ -199,7 +202,7 @@ def qrels_queue(qrels_path: Path, queries_path: Path, *, fraction: float, seed: 
                 title=str(query["text"]),
                 image_id=row["image_id"],
                 context={"qtype": str(query.get("qtype", ""))},
-                ref={"qid": row["qid"]},
+                export_keys={"qid": row["qid"]},
                 fields=[REL_FIELD],
             )
         )

@@ -18,6 +18,8 @@ const item = (id: string, fields: Field[]): Item => ({
   image_url: null,
   reference_urls: [],
   context: {},
+  scores: {},
+  model_version: null,
   fields,
 });
 

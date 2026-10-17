@@ -21,8 +21,10 @@ from pipeline.review.items import (
 )
 from pipeline.review.server import make_server
 from pipeline.review.store import (
+    LABELS_SCHEMA,
     Decision,
     DecisionStore,
+    export_all,
     export_queue,
     queue_stats,
 )
@@ -110,8 +112,8 @@ def test_latest_decision_per_item_wins(tmp_path: Path) -> None:
 def test_store_survives_a_torn_last_line(tmp_path: Path) -> None:
     store = DecisionStore(tmp_path, "q")
     store.append(_decision("a", "yes", T0))
-    with store.path.open("a") as handle:
-        handle.write('{"item_id": "b", "val')  # crash mid-write
+    with store.path.open("ab") as handle:
+        handle.write('{"item_id": "b", "annotator": "Cường'.encode()[:-1])  # torn mid-character
 
     assert list(store.latest()) == ["a"]
     store.append(_decision("c", "no", T0))  # appends still parse afterwards
@@ -136,7 +138,8 @@ def test_export_uses_the_labels_shape(tmp_path: Path) -> None:
         item_id="k1",
         mode="kg",
         title="A → B",
-        ref={"src": "e1", "rel": "located_in", "dst": "p1"},
+        model_version="kg-v1",
+        export_keys={"src": "e1", "rel": "located_in", "dst": "p1"},
         fields=[Field(name="edge_correct", options=YES_NO)],
     )
     write_queue(tmp_path, "kg", [item, _item("unseen")])
@@ -153,22 +156,36 @@ def test_export_uses_the_labels_shape(tmp_path: Path) -> None:
 
     frame = export_queue(tmp_path, "kg")
 
-    assert frame.columns[:7] == [
-        "item_id",
-        "image_id",
-        "entity_id",
-        "criterion",
-        "value",
-        "source",
-        "annotator",
-    ]
+    assert frame.columns[: len(LABELS_SCHEMA)] == LABELS_SCHEMA.names()
     assert frame.height == 1  # undecided items are not exported
     row = frame.row(0, named=True)
     assert row["source"] == "human"
     assert (row["criterion"], row["value"]) == ("edge_correct", "yes")
     assert (row["src"], row["rel"], row["dst"]) == ("e1", "located_in", "p1")
+    assert (row["mode"], row["model_version"], row["queue"]) == ("kg", "kg-v1", "kg")
     assert (tmp_path / "export" / "kg.parquet").exists()
     assert (tmp_path / "export" / "kg.csv").exists()
+
+
+def test_export_all_collects_human_labels_and_trec_qrels(tmp_path: Path) -> None:
+    rel = Field(name="rel", options=[Option(value=v, key=v) for v in "012"])
+    qrels = Item(
+        item_id="q1:7", mode="qrels", title="q", image_id=7, export_keys={"qid": "q1"}, fields=[rel]
+    )
+    write_queue(tmp_path, "qrels", [qrels])
+    write_queue(tmp_path, "audit", [_item("a")])
+    DecisionStore(tmp_path, "audit").append(_decision("a", "no", T0))
+    DecisionStore(tmp_path, "qrels").append(
+        Decision(item_id="q1:7", values={"rel": "2"}, annotator="t", decided_at=T0, elapsed_ms=1)
+    )
+
+    export_all(tmp_path)
+
+    labels = pl.read_parquet(tmp_path / "export" / "labels_human.parquet")
+    assert labels.columns == LABELS_SCHEMA.names()
+    assert sorted(labels["queue"]) == ["audit", "qrels"]
+    assert (tmp_path / "export" / "qrels.qrels.tsv").read_text() == "q1\t0\t7\t2\n"
+    assert not (tmp_path / "export" / "audit.qrels.tsv").exists()
 
 
 def test_stats_items_per_hour_ignores_breaks(tmp_path: Path) -> None:
@@ -178,6 +195,8 @@ def test_stats_items_per_hour_ignores_breaks(tmp_path: Path) -> None:
     for i in range(6):
         at += timedelta(seconds=10) if i != 3 else timedelta(hours=2)  # a lunch break
         store.append(_decision(str(i), "yes", at, elapsed_ms=10_000))
+
+    store.append(_decision("gone", "yes", at, elapsed_ms=10_000))  # item dropped by a rebuild
 
     stats = queue_stats(tmp_path, "q")
 
@@ -247,6 +266,7 @@ def test_relevance_queue_samples_reviewable_labeled_pairs(data_dir: Path) -> Non
     # 5 is unlabeled, 10 conflicts (and is not downloaded), 2 is a near-duplicate
     assert ids == {1, 3, 4, 6, 7, 8, 9}
     one = next(i for i in items if i.image_id == 4)
+    assert one.mode == "relevance"
     assert one.title == "Vịnh Hạ Long"
     assert one.fields[0].name == "relevance"
     assert one.fields[0].default == "no"  # the existing verify label
@@ -269,6 +289,9 @@ def test_moderation_queue_asks_every_criterion(data_dir: Path) -> None:
 
     assert len(items) == 4
     assert all([f.name for f in i.fields] == [f.name for f in MODERATION_FIELDS] for i in items)
+    exact = moderation_queue(data_dir, n=1, seed=0, image_ids=[3, 7, 9])
+    assert [i.image_id for i in exact] == [3, 7, 9]
+    assert exact[1].entity_id == "e2"
 
 
 def test_kg_queue_from_edges(data_dir: Path, tmp_path: Path) -> None:
@@ -286,7 +309,7 @@ def test_kg_queue_from_edges(data_dir: Path, tmp_path: Path) -> None:
     items = kg_queue(data_dir, edges, n=10, seed=0)
 
     assert len(items) == 2
-    near = next(i for i in items if i.ref["rel"] == "near")
+    near = next(i for i in items if i.export_keys["rel"] == "near")
     assert near.title == "Chùa Một Cột —near→ Vịnh Hạ Long"  # entity ids resolved to names
     assert near.mode == "kg"
     assert near.image_id is None
@@ -297,6 +320,7 @@ def test_qrels_queue_samples_a_fraction_blind(tmp_path: Path) -> None:
     qrels = tmp_path / "qrels.tsv"
     qrels.write_text("".join(f"q{q} 0 {d} {d % 3}\n" for q in (1, 2) for d in range(1, 11)))
     queries = tmp_path / "queries.jsonl"
+    (tmp_path / "empty.jsonl").write_text("")
     queries.write_text(
         "\n".join(
             json.dumps({"qid": f"q{q}", "text": f"ảnh {q}", "qtype": "single"}) for q in (1, 2)
@@ -304,12 +328,14 @@ def test_qrels_queue_samples_a_fraction_blind(tmp_path: Path) -> None:
     )
 
     items = qrels_queue(qrels, queries, fraction=0.2, seed=0)
+    with pytest.raises(ValueError, match="not in"):
+        qrels_queue(qrels, tmp_path / "empty.jsonl", fraction=0.2, seed=0)
 
     assert len(items) == 4  # 20% of 20 judgments
     assert all(i.fields[0].default is None for i in items)
     assert {o.value for o in items[0].fields[0].options} == {"0", "1", "2"}
     assert items[0].title.startswith("ảnh ")
-    assert items[0].ref["qid"] in {"q1", "q2"}
+    assert items[0].export_keys["qid"] in {"q1", "q2"}
 
 
 # --- server ------------------------------------------------------------------------------------
@@ -355,11 +381,11 @@ def _get(url: str) -> tuple[int, bytes]:
         return exc.code, exc.read()
 
 
-def _post(url: str, body: object) -> tuple[int, bytes]:
+def _post(url: str, body: object, headers: dict[str, str] | None = None) -> tuple[int, bytes]:
     request = urllib.request.Request(
         url,
         data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", **(headers or {})},
         method="POST",
     )
     try:
@@ -392,6 +418,21 @@ def test_server_rejects_bad_decisions(server: str) -> None:
     assert _post(url, {"item_id": "a", "values": {"relevance": "maybe"}, "elapsed_ms": 1})[0] == 400
     assert _post(url, {"item_id": "zz", "values": {"relevance": "no"}, "elapsed_ms": 1})[0] == 404
     assert _post(f"{server}/api/review/queues/nope/decisions", {})[0] == 404
+
+
+def test_server_refuses_cross_site_requests(server: str) -> None:
+    url = f"{server}/api/review/queues/audit/decisions"
+    body = {"item_id": "a", "values": {"relevance": "no"}, "elapsed_ms": 1}
+    # a form or text/plain POST from any page skips the CORS preflight
+    assert _post(url, body, {"Content-Type": "text/plain"})[0] == 415
+    assert _post(url, body, {"Origin": "https://evil.example"})[0] == 403
+    assert _post(url, body, {"Origin": "http://localhost:5173"})[0] == 200  # vite dev server
+    request = urllib.request.Request(
+        f"{server}/api/review/queues", headers={"Host": "evil.example"}
+    )
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        urllib.request.urlopen(request)  # DNS rebinding: the page's own host name
+    assert exc.value.code == 403
 
 
 def test_server_serves_thumbs_and_the_spa_but_nothing_else(server: str) -> None:

@@ -16,11 +16,13 @@ export type Field = {
 };
 export type Item = {
   item_id: string;
-  mode: "moderation" | "kg" | "qrels";
+  mode: "relevance" | "moderation" | "kg" | "qrels";
   title: string;
   image_url: string | null;
   reference_urls: string[];
   context: Record<string, string>;
+  scores: Record<string, number>;
+  model_version: string | null;
   fields: Field[];
 };
 export type Values = Record<string, string>;

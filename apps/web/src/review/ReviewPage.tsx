@@ -5,6 +5,17 @@ import "./review.css";
 
 const PREFETCH = 5;
 
+// Vietnamese names for the context keys builders emit; unknown keys are shown as-is.
+const CONTEXT_LABELS: Record<string, string> = {
+  leaf_label: "Nhóm",
+  province: "Tỉnh",
+  query_type: "Loại truy vấn",
+  page_title: "Tiêu đề trang",
+  qtype: "Loại truy vấn",
+  evidence: "Bằng chứng",
+  confidence: "Độ tin cậy",
+};
+
 export default function ReviewPage() {
   const queue = new URLSearchParams(window.location.search).get("queue");
   return queue ? <QueueReview name={queue} /> : <QueueList />;
@@ -14,7 +25,9 @@ function QueueList() {
   const [queues, setQueues] = useState<QueueSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
-    listQueues().then(setQueues, (e: Error) => setError(e.message));
+    listQueues().then(setQueues, (e: Error) =>
+      setError(`Không tải được danh sách (${e.message})`),
+    );
   }, []);
   return (
     <main className="review-list">
@@ -57,7 +70,7 @@ function QueueReview({ name }: { name: string }) {
   useEffect(() => {
     loadQueue(name).then(
       (q) => update(start(q.items, q.decisions)),
-      (e: Error) => setError(e.message),
+      (e: Error) => setError(`Không tải được hàng đợi (${e.message})`),
     );
   }, [name, update]);
 
@@ -84,6 +97,7 @@ function QueueReview({ name }: { name: string }) {
       const before = current.current;
       if (!before || event.ctrlKey || event.metaKey || event.altKey) return;
       const result = onKey(before, event.key);
+      const previous = result.submit && before.decisions[result.submit.item_id];
       if (result.session === before) return;
       event.preventDefault();
       update(result.session);
@@ -102,11 +116,15 @@ function QueueReview({ name }: { name: string }) {
         },
         (e: Error) => {
           // Keep the reviewer on the item that failed to save.
-          setError(`Chưa lưu được ${submission.item_id}: ${e.message}`);
+          setError(
+            `Chưa lưu được ${submission.item_id} (lỗi máy chủ: ${e.message})`,
+          );
           const s = current.current;
           if (!s) return;
+          // Back to what the server still has: the earlier decision of a revision, or none.
           const decisions = { ...s.decisions };
-          delete decisions[submission.item_id];
+          if (previous) decisions[submission.item_id] = previous;
+          else delete decisions[submission.item_id];
           const back = s.items.findIndex(
             (i) => i.item_id === submission.item_id,
           );
@@ -186,11 +204,27 @@ function ItemView({ item, session }: { item: Item; session: Session }) {
         <dl className="review-context">
           {Object.entries(item.context).map(([k, v]) => (
             <div key={k}>
-              <dt>{k}</dt>
+              <dt>{CONTEXT_LABELS[k] ?? k}</dt>
               <dd>{v}</dd>
             </div>
           ))}
         </dl>
+        {Object.keys(item.scores).length > 0 && (
+          <dl className="review-context review-scores">
+            {Object.entries(item.scores).map(([k, v]) => (
+              <div key={k}>
+                <dt>{k}</dt>
+                <dd>{v.toFixed(2)}</dd>
+              </div>
+            ))}
+            {item.model_version && (
+              <div>
+                <dt>model</dt>
+                <dd>{item.model_version}</dd>
+              </div>
+            )}
+          </dl>
+        )}
         {item.reference_urls.length > 0 && (
           <div className="review-refs" aria-label="Ảnh tham chiếu">
             {item.reference_urls.map((url) => (

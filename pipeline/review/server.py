@@ -24,8 +24,8 @@ import polars as pl
 from pydantic import BaseModel, ValidationError
 
 from pipeline.download import assets_path
-from pipeline.review.items import Item, list_queues, read_queue
-from pipeline.review.store import MAX_ITEM_MS, Decision, DecisionStore
+from pipeline.review.items import Item, list_queues, queue_path, read_queue
+from pipeline.review.store import MAX_ITEM_MS, Decision, DecisionStore, queue_stats
 
 log = logging.getLogger(__name__)
 
@@ -42,6 +42,7 @@ _TYPES = {
     ".json": "application/json",
 }
 MAX_BODY = 64 * 1024
+LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 
 class DecisionIn(BaseModel):
@@ -68,7 +69,7 @@ class ReviewApp:
         """Queue items by id, re-read when the queue file changes; None if there is no queue."""
         if name not in list_queues(self.review_dir):
             return None
-        path = self.review_dir / "queues" / f"{name}.jsonl"
+        path = queue_path(self.review_dir, name)
         mtime = path.stat().st_mtime
         with self._lock:
             cached = self._queues.get(name)
@@ -93,7 +94,7 @@ class ReviewApp:
                 url for url in map(self.thumb_url, item.references) if url is not None
             ]
             out.append(row)
-        decisions = {k: d.values for k, d in self.store(name).latest().items() if k in items}
+        decisions = {k: d.values for k, d in self.store(name).latest(items).items()}
         return {"name": name, "annotator": self.annotator, "items": out, "decisions": decisions}
 
 
@@ -123,14 +124,28 @@ class Handler(BaseHTTPRequestHandler):
     def _error(self, status: int, message: str) -> None:
         self._json({"error": message}, status)
 
+    def _trusted(self) -> bool:
+        """Only same-machine pages: a Host (DNS rebinding) or Origin (CSRF from another site)
+        naming any other host is refused."""
+        for header in ("Host", "Origin"):
+            value = self.headers.get(header)
+            if value is None:
+                continue
+            host = urlsplit(value if "//" in value else f"//{value}").hostname
+            if host not in LOCAL_HOSTS:
+                self._error(HTTPStatus.FORBIDDEN, f"{header} {value!r} is not local")
+                return False
+        return True
+
     def do_GET(self) -> None:
+        if not self._trusted():
+            return
         path = urlsplit(self.path).path
         if path == "/api/review/queues":
             rows = []
             for name in list_queues(self.app.review_dir):
-                items = self.app.items(name) or {}
-                decided = sum(1 for k in self.app.store(name).latest() if k in items)
-                rows.append({"name": name, "total": len(items), "decided": decided})
+                stats = queue_stats(self.app.review_dir, name)
+                rows.append({"name": name, "total": stats.total, "decided": stats.decided})
             return self._json(rows)
         if match := _QUEUE.match(path):
             queue = self.app.items(match[1])
@@ -162,6 +177,11 @@ class Handler(BaseHTTPRequestHandler):
         self._send(HTTPStatus.OK, file.read_bytes(), content_type)
 
     def do_POST(self) -> None:
+        if not self._trusted():
+            return
+        # A JSON content type forces a CORS preflight, which cross-site pages can't pass.
+        if self.headers.get_content_type() != "application/json":
+            return self._error(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, "expected application/json")
         match = _DECISIONS.match(urlsplit(self.path).path)
         items = self.app.items(match[1]) if match else None
         if match is None or items is None:

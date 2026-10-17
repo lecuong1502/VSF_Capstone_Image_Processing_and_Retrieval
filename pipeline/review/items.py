@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 
 from pipeline.files import atomic_write_text
 
-Mode = Literal["moderation", "kg", "qrels"]
+Mode = Literal["relevance", "moderation", "kg", "qrels"]
 
 # Keys the UI uses for navigation – an option can't take them.
 RESERVED_KEYS = frozenset({"Enter", "Backspace", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"})
@@ -59,7 +59,9 @@ class Item(BaseModel):
     entity_id: str | None = None
     context: dict[str, str] = {}
     references: list[int] = []  # image_ids shown small next to the image, e.g. accepted examples
-    ref: dict[str, str] = {}  # keys copied into the export (e.g. src/rel/dst, qid)
+    scores: dict[str, float] = {}  # model outputs shown to the reviewer (e.g. p_watermark)
+    model_version: str | None = None  # of the model that put the item in the queue (spec §4.1 T5)
+    export_keys: dict[str, str] = {}  # columns copied into the export (e.g. src/rel/dst, qid)
 
 
 def yes_no(name: str, label: str = "", default: str | None = None) -> Field:
@@ -68,9 +70,9 @@ def yes_no(name: str, label: str = "", default: str | None = None) -> Field:
         label=label or name,
         default=default,
         options=[
-            Option(value="yes", key="y", label="yes"),
-            Option(value="no", key="n", label="no"),
-            Option(value="unsure", key="u", label="unsure"),
+            Option(value="yes", key="y", label="có"),
+            Option(value="no", key="n", label="không"),
+            Option(value="unsure", key="u", label="không chắc"),
         ],
     )
 
