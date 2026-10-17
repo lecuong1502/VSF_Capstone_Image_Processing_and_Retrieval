@@ -51,6 +51,7 @@ make dedup-sheet   # reports/dedup_pairs.html for labeling; then: uv run python 
 make embed         # EMBED_MODEL FP16 ONNX on GPU → $DATA_DIR/embeddings/<org>--<model>/part-*.parquet (resumable); make embed-bench: img/s table
 make review        # /review on http://127.0.0.1:8765/review; queues: uv run python -m pipeline.review queue {relevance,moderation,kg,qrels}; then export / stats
 make gemini-label  # PAID: Gemini labels for the 5k stratified sample → $DATA_DIR/gemini_labels/ (pilot first: --limit 100); then python -m pipeline.gemini_label audit-queue / kappa
+make heads         # moderation heads on the embeddings → $DATA_DIR/heads/<version>/{*.npz,report.json}, $DATA_DIR/moderation/{moderation,relevance}_scores.parquet, dedup/representative_flags.parquet (then make dedup)
 make ingest        # merge RAW_DATA_DIR CSVs → $DATA_DIR/ingest/{entities,images,labels}.parquet, conflicts.csv, vsf.duckdb
 ```
 

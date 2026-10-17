@@ -32,6 +32,8 @@ click==8.5.0
     # via
     #   huggingface-hub
     #   wandb
+cloudpickle==3.1.2
+    # via joblib
 colorama==0.4.6 ; sys_platform == 'win32'
     # via
     #   pytest
@@ -105,6 +107,8 @@ img2dataset==1.47.0
     # via vsf-pipeline
 iniconfig==2.3.1
     # via pytest
+joblib==1.6.0
+    # via scikit-learn
 librt==0.16.0 ; platform_python_implementation != 'PyPy'
     # via mypy
 ml-dtypes==0.6.0
@@ -112,6 +116,8 @@ ml-dtypes==0.6.0
 mypy==2.4.0
 mypy-extensions==1.1.0
     # via mypy
+narwhals==2.27.1
+    # via scikit-learn
 nodeenv==1.11.0
     # via pre-commit
 numpy==2.5.4
@@ -123,6 +129,7 @@ numpy==2.5.4
     #   onnxruntime-gpu
     #   opencv-python-headless
     #   pandas
+    #   scikit-learn
     #   scipy
     #   webdataset
 nvidia-cublas==13.8.1.7
@@ -250,8 +257,12 @@ requests==2.34.2
     #   opentelemetry-exporter-otlp-proto-http
     #   wandb
 ruff==0.17.1
+scikit-learn==1.9.1
+    # via vsf-pipeline
 scipy==1.18.1
-    # via albumentations
+    # via
+    #   albumentations
+    #   scikit-learn
 simsimd==6.5.16
     # via albucore
 six==1.17.0
@@ -266,6 +277,8 @@ tenacity==9.1.4
     # via google-genai
 termcolor==3.3.0
     # via fire
+threadpoolctl==3.7.0
+    # via scikit-learn
 tokenizers==0.23.3
     # via vsf-pipeline
 tqdm==4.70.1
