@@ -31,7 +31,6 @@ import logging
 import os
 import re
 import shutil
-import tarfile
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -42,11 +41,14 @@ import polars as pl
 from PIL import Image
 
 from pipeline import config
-from pipeline.files import atomic_write
+from pipeline.files import atomic_write, exclusive_lock
+from pipeline.shards import iter_shard_images
 
 log = logging.getLogger(__name__)
 
 RETRYABLE = frozenset({"failed"})
+# Errors Pillow raises for undecodable or oversized images.
+IMAGE_ERRORS = (OSError, ValueError, Image.DecompressionBombError)
 # Permanent failures: the image will never be available (the dead-link rate counts these).
 UNREACHABLE = frozenset({"dead", "ssl_error", "blocked", "not_image", "opted_out", "invalid_url"})
 STORED_SIZE = 1024  # short side of the stored image used for embeddings (spec §4.1)
@@ -148,6 +150,28 @@ def run_download(
     max_attempts: int = 3,
     chunk_size: int = CHUNK_SIZE,
     sleep: Callable[[float], None] = time.sleep,
+) -> Summary:
+    """Download every planned image; holds the data lock so `make dedup` can't run meanwhile."""
+    with exclusive_lock(lock_path(data_dir)):
+        return _run_download(
+            images, data_dir, fetch, rounds, backoff_s, max_attempts, chunk_size, sleep
+        )
+
+
+def lock_path(data_dir: Path) -> Path:
+    """Held by steps that rewrite image_assets.parquet (download, dedup)."""
+    return data_dir / "download" / ".lock"
+
+
+def _run_download(
+    images: pl.DataFrame,
+    data_dir: Path,
+    fetch: Fetcher,
+    rounds: int,
+    backoff_s: float,
+    max_attempts: int,
+    chunk_size: int,
+    sleep: Callable[[float], None],
 ) -> Summary:
     assets = _mark_invalid(images, load_assets(data_dir))
     _save(assets, data_dir)
@@ -289,22 +313,14 @@ def _make_thumbnails(results: pl.DataFrame, run_dir: Path, thumbs_dir: Path) -> 
     ok = results.filter(pl.col("download_status") == "ok")
     for shard, rows in ok.group_by("shard"):
         wanted = dict(zip(rows["key"], rows["image_id"], strict=True))
-        with tarfile.open(run_dir / f"{shard[0]}.tar") as tar:
-            for member in tar:
-                key, _, ext = member.name.partition(".")
-                if key not in wanted or ext not in {"jpg", "jpeg", "png", "webp"}:
-                    continue
-                image_id = int(wanted[key])
-                data = tar.extractfile(member)
-                if data is None:
-                    continue
-                try:
-                    _write_thumbnail(data.read(), thumbs_dir / f"{image_id}.webp")
-                except (OSError, ValueError, Image.DecompressionBombError) as exc:
-                    log.warning("No thumbnail for image %d: %s", image_id, exc)
-                    made.pop(image_id, None)
-                    continue
-                made[image_id] = f"{thumbs_dir.name}/{image_id}.webp"
+        for image_id, image_bytes in iter_shard_images(run_dir / f"{shard[0]}.tar", wanted):
+            try:
+                _write_thumbnail(image_bytes, thumbs_dir / f"{image_id}.webp")
+            except IMAGE_ERRORS as exc:
+                log.warning("No thumbnail for image %d: %s", image_id, exc)
+                made.pop(image_id, None)
+                continue
+            made[image_id] = f"{thumbs_dir.name}/{image_id}.webp"
     return made
 
 
