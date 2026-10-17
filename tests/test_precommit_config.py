@@ -58,6 +58,7 @@ def test_blocks_data_weights_and_secrets(path: str) -> None:
     [
         "data/sample/.gitkeep",
         "data/sample/images.csv",
+        "data/sample/images.parquet",
         ".env.example",
         "pipeline/ingest.py",
         "docs/data.md",

@@ -22,7 +22,7 @@ repos:
         language: fail
         entry: "Do not commit raw data (only data/sample/ is allowed), reports, model weights, data files or .env files:"
         files: '^(data/(?!sample/)|models/|reports/)|\.(onnx|pt|pth|safetensors|parquet|duckdb|sqlite)$|(^|/)\.env(\..+)?$'
-        exclude: '(^|/)\.env\.example$'
+        exclude: '(^|/)\.env\.example$|^data/sample/'
 
       # Python
       - id: ruff-check
