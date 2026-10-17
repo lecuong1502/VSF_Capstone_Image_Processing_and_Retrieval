@@ -9,8 +9,8 @@ EXPORT := $(UV) export --quiet --frozen --no-hashes --all-groups
 GATEWAY := services/gateway
 WEB := apps/web
 
-.PHONY: help setup sync requirements lint lint-py lint-go lint-web fmt test test-py test-go build-web \
-	gemini-cost gemini-smoke ingest sample profile download dedup dedup-sheet embed embed-bench pipeline restore eval loadtest
+.PHONY: help setup sync requirements lint lint-py lint-go lint-web fmt test test-py test-go test-web build-web \
+	gemini-cost gemini-smoke ingest sample profile download dedup dedup-sheet embed embed-bench review pipeline restore eval loadtest
 
 help: ## List available targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-14s %s\n", $$1, $$2}'
@@ -54,13 +54,16 @@ fmt: ## Auto-format and auto-fix lint issues (Python, Go, web)
 	gofmt -w $(GATEWAY)
 	cd $(WEB) && npm run -s format
 
-test: test-py test-go ## Run all unit tests
+test: test-py test-go test-web ## Run all unit tests
 
 test-py: ## pytest for each Python project
 	@for p in $(PROJECTS); do $(UV) run --directory $$p pytest || exit 1; done
 
 test-go: ## go test for the gateway
 	cd $(GATEWAY) && go test ./...
+
+test-web: ## vitest for the web app
+	cd $(WEB) && npm test --silent
 
 build-web: ## Type-check and build the web app
 	cd $(WEB) && npm run build
@@ -94,6 +97,9 @@ embed: ## Embed every downloaded image with EMBED_MODEL (FP16 ONNX on GPU) → $
 
 embed-bench: ## Images/s per batch size for EMBED_MODEL on this GPU
 	$(UV) run python -m pipeline.embed bench
+
+review: build-web ## Serve the /review tool on http://127.0.0.1:8765/review (queues: python -m pipeline.review queue …)
+	$(UV) run python -m pipeline.review serve
 
 pipeline: ingest download dedup embed ## Run the offline pipeline (ingest → … → index)
 	@echo "Steps after ingest are not implemented yet – see milestones M1/M2."
