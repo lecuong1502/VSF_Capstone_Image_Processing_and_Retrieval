@@ -12,7 +12,7 @@ import pytest
 from onnx import TensorProto, helper, numpy_helper
 from PIL import Image
 
-from pipeline.embed import bench, embedding_path, load_embeddings, run_embedding
+from pipeline.embed import bench, embedding_matrix, embedding_path, load_embeddings, run_embedding
 from pipeline.embedder import Embedder, Preprocessor, model_dir_name
 
 DIM = 4
@@ -441,3 +441,15 @@ def test_embedding_takes_the_data_lock(data_dir: Path, combined_model: Path) -> 
 
 def test_load_embeddings_of_an_empty_dir_has_the_embedding_column(tmp_path: Path) -> None:
     assert "embedding" in load_embeddings(tmp_path).columns
+
+
+def test_embedding_matrix_from_array_and_list_columns() -> None:
+    vectors = np.arange(6, dtype=np.float32).reshape(2, 3)
+    as_array = pl.DataFrame({"embedding": vectors}, schema={"embedding": pl.Array(pl.Float32, 3)})
+    as_list = as_array.with_columns(pl.col("embedding").cast(pl.List(pl.Float32)))
+
+    for frame in (as_array, as_list):
+        out = embedding_matrix(frame)
+        assert out.dtype == np.float32 and np.array_equal(out, vectors)
+        assert out.flags.writeable  # callers normalize in place
+    assert embedding_matrix(load_embeddings(Path("/nonexistent"))).shape[0] == 0

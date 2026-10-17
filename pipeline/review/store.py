@@ -36,6 +36,10 @@ LABELS_SCHEMA = pl.Schema(
 ALL_LABELS = "labels_human"  # export/labels_human.parquet: every queue, labels columns only
 
 
+def labels_human_path(review_dir: Path) -> Path:
+    return review_dir / "export" / f"{ALL_LABELS}.parquet"
+
+
 class Decision(BaseModel):
     item_id: str
     values: dict[str, str]
@@ -152,7 +156,7 @@ def export_all(review_dir: Path) -> dict[str, pl.DataFrame]:
     frames = {q: export_queue(review_dir, q) for q in list_queues(review_dir)}
     parts = [f.select(LABELS_SCHEMA.names()) for f in frames.values()]
     labels = pl.concat(parts) if parts else pl.DataFrame(schema=LABELS_SCHEMA)
-    atomic_write(review_dir / "export" / f"{ALL_LABELS}.parquet", labels.write_parquet)
+    atomic_write(labels_human_path(review_dir), labels.write_parquet)
     return frames
 
 
