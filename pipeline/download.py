@@ -2,14 +2,22 @@
 `image_assets` (one row per image) up to date. Re-running only retries transient failures.
 
 Statuses:
-- ok           downloaded; stored resized (short side ≤ 768 px) with sha256 and real size
+- ok           downloaded; stored resized (short side ≤ 1024 px) with sha256 and real size
 - failed       transient error (timeout, 5xx, connection reset) – retried with backoff, at most
                `max_attempts` times across runs
 - dead         404/410/403/401/400 or unresolvable host – not retried
 - ssl_error    the server's TLS certificate fails verification – not retried
 - blocked      Facebook lookaside URLs answer with an HTML page instead of the image – not retried
 - not_image    any other URL that returns something that isn't an image – not retried
+- opted_out    the site forbids AI use via `X-Robots-Tag` (noai/noimageai, spec §4.1) – not retried
 - invalid_url  not http(s) (e.g. `x-raw-image:///…` left by Google) – never fetched
+
+Work is checkpointed per chunk of `chunk_size` images (one img2dataset call each): a crash loses
+at most the chunk in flight, and run directories no longer referenced by `image_assets` (left by
+a crash) are deleted at the start of the next run.
+
+Spec §4.1 T1 deviations: statuses are grouped by what to do next (retry or not) rather than
+4xx/5xx/timeout; the raw error message is kept in `error`.
 
 Usage: python -m pipeline.download [--rounds 3] [--backoff 60] [--max-attempts 3]
 """
@@ -22,6 +30,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import tarfile
 import time
 from collections.abc import Callable
@@ -38,8 +47,12 @@ from pipeline.files import atomic_write
 log = logging.getLogger(__name__)
 
 RETRYABLE = frozenset({"failed"})
-STORED_SIZE = 768  # short side of the stored image used for embeddings
-THUMB_SIZE = 256  # long side of the UI thumbnail
+# Permanent failures: the image will never be available (the dead-link rate counts these).
+UNREACHABLE = frozenset({"dead", "ssl_error", "blocked", "not_image", "opted_out", "invalid_url"})
+STORED_SIZE = 1024  # short side of the stored image used for embeddings (spec §4.1)
+THUMB_SIZE = 384  # long side of the UI thumbnail (spec §6)
+CHUNK_SIZE = 2000  # images per img2dataset call = checkpoint granularity
+_OPTED_OUT = "X-Robots-Tag"
 _DEAD = re.compile(
     r"HTTP Error (400|401|403|404|410)|Name or service not known|No address associated|"
     r"nodename nor servname"
@@ -77,6 +90,8 @@ def classify(status: str, error: str | None, url: str) -> str:
     message = error or ""
     if status == "failed_to_resize" or "decoding error" in message.lower():
         return "blocked" if _BLOCKED_HOSTS.match(url) else "not_image"
+    if _OPTED_OUT in message:
+        return "opted_out"
     if "CERTIFICATE_VERIFY_FAILED" in message:
         return "ssl_error"
     if _DEAD.search(message):
@@ -131,10 +146,12 @@ def run_download(
     rounds: int = 3,
     backoff_s: float = 60,
     max_attempts: int = 3,
+    chunk_size: int = CHUNK_SIZE,
     sleep: Callable[[float], None] = time.sleep,
 ) -> Summary:
     assets = _mark_invalid(images, load_assets(data_dir))
     _save(assets, data_dir)
+    _remove_orphaned_runs(data_dir, assets)
     summary = Summary()
     attempted: set[int] = set()
     for round_no in range(rounds):
@@ -148,41 +165,66 @@ def run_download(
             )
             sleep(wait)
         run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%S") + f"-r{round_no + 1}"
-        run_dir = data_dir / "download" / "runs" / run_id
-        started = time.monotonic()
-        results = fetch(todo.rename({"image_url": "url"}), run_dir)
-        seconds = time.monotonic() - started
-
-        results = results.with_columns(
-            pl.struct("status", "error_message", "url")
-            .map_elements(
-                lambda r: classify(r["status"], r["error_message"], r["url"]),
-                return_dtype=pl.String,
-            )
-            .alias("download_status")
-        )
-        thumbs = _make_thumbnails(results, run_dir, data_dir / "thumbs")
-        assets = _update(assets, results, thumbs, run_dir.relative_to(data_dir))
-        _save(assets, data_dir)
-
-        counts = dict(results.group_by("download_status").len().rows())
-        _log_run(data_dir, run_id, results.height, counts, seconds)
-        log.info(
-            "Run %s: %d images in %.0fs (%.1f img/s) %s",
-            run_id,
-            results.height,
-            seconds,
-            results.height / seconds if seconds else 0,
-            counts,
-        )
-        attempted.update(results["image_id"].to_list())
-        summary.seconds += seconds
+        for chunk_no, chunk in enumerate(todo.iter_slices(chunk_size)):
+            run_dir = data_dir / "download" / "runs" / f"{run_id}-c{chunk_no:03d}"
+            assets, results, seconds = _fetch_chunk(chunk, run_dir, data_dir, assets, fetch)
+            attempted.update(results["image_id"].to_list())
+            summary.seconds += seconds
 
     final = assets.filter(pl.col("image_id").is_in(images["image_id"].implode()))
     summary.attempted = len(attempted)
     summary.statuses = dict(final.group_by("download_status").len().rows())
     summary.ok = summary.statuses.get("ok", 0)
     return summary
+
+
+def _fetch_chunk(
+    chunk: pl.DataFrame, run_dir: Path, data_dir: Path, assets: pl.DataFrame, fetch: Fetcher
+) -> tuple[pl.DataFrame, pl.DataFrame, float]:
+    """Fetch one chunk, then immediately persist thumbnails, assets and the run log."""
+    started = time.monotonic()
+    results = fetch(chunk.rename({"image_url": "url"}), run_dir)
+    seconds = time.monotonic() - started
+    results = results.with_columns(
+        pl.struct("status", "error_message", "url")
+        .map_elements(
+            lambda r: classify(r["status"], r["error_message"], r["url"]), return_dtype=pl.String
+        )
+        .alias("download_status")
+    )
+    thumbs = _make_thumbnails(results, run_dir, data_dir / "thumbs")
+    assets = _update(assets, results, thumbs, run_dir.relative_to(data_dir))
+    _save(assets, data_dir)
+    counts = dict(results.group_by("download_status").len().rows())
+    _log_run(data_dir, run_dir.name, results.height, counts, seconds)
+    log.info(
+        "%s: %d images in %.0fs (%.1f img/s) %s",
+        run_dir.name,
+        results.height,
+        seconds,
+        results.height / seconds if seconds else 0,
+        counts,
+    )
+    return assets, results, seconds
+
+
+def _remove_orphaned_runs(data_dir: Path, assets: pl.DataFrame) -> None:
+    """Delete run dirs (and their input lists) that no `image_assets` row points to."""
+    runs = data_dir / "download" / "runs"
+    if not runs.exists():
+        return
+    referenced = {
+        p.split("/")[2] for p in assets["shard_path"].drop_nulls().to_list() if p.count("/") >= 3
+    }
+    for path in runs.iterdir():
+        name = path.name.removesuffix(".input.parquet")
+        if name in referenced:
+            continue
+        log.info("Removing orphaned run output %s", path.name)
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
 
 
 def _mark_invalid(images: pl.DataFrame, assets: pl.DataFrame) -> pl.DataFrame:
@@ -256,15 +298,23 @@ def _make_thumbnails(results: pl.DataFrame, run_dir: Path, thumbs_dir: Path) -> 
                 data = tar.extractfile(member)
                 if data is None:
                     continue
-                _write_thumbnail(data.read(), thumbs_dir / f"{image_id}.webp")
+                try:
+                    _write_thumbnail(data.read(), thumbs_dir / f"{image_id}.webp")
+                except (OSError, ValueError, Image.DecompressionBombError) as exc:
+                    log.warning("No thumbnail for image %d: %s", image_id, exc)
+                    made.pop(image_id, None)
+                    continue
                 made[image_id] = f"{thumbs_dir.name}/{image_id}.webp"
     return made
 
 
 def _write_thumbnail(image_bytes: bytes, out: Path) -> None:
     with Image.open(io.BytesIO(image_bytes)) as image:
-        thumb = image.convert("RGB")
-        thumb.thumbnail((THUMB_SIZE, THUMB_SIZE))
+        image.draft("RGB", (THUMB_SIZE, THUMB_SIZE))  # cheap JPEG downscale while decoding
+        rgba = image.convert("RGBA")
+    thumb = Image.new("RGB", rgba.size, (255, 255, 255))
+    thumb.paste(rgba, mask=rgba.getchannel("A"))  # transparent areas become white, not black
+    thumb.thumbnail((THUMB_SIZE, THUMB_SIZE))
 
     def save(tmp: Path) -> None:
         thumb.save(tmp, "WEBP", quality=80)
@@ -313,15 +363,15 @@ def img2dataset_fetch(batch: pl.DataFrame, out_dir: Path) -> pl.DataFrame:
         resize_mode="keep_ratio",
         resize_only_if_bigger=True,
         compute_hash="sha256",
-        retries=1,
-        timeout=20,
+        retries=2,
+        timeout=10,
         processes_count=max(1, (os.cpu_count() or 2) // 2),
         thread_count=32,
         number_sample_per_shard=1000,
         distributor="multiprocessing",
         enable_wandb=False,
         user_agent_token="vsf-capstone-research",
-        disallowed_header_directives=[],
+        # img2dataset's default: skip images whose X-Robots-Tag says noai/noimageai/noindex.
     )
     results = [
         pl.read_parquet(p).with_columns(pl.lit(p.stem).alias("shard"))
@@ -353,15 +403,16 @@ def main() -> None:
         max_attempts=args.max_attempts,
     )
     total = sum(summary.statuses.values())
-    unreachable = total - summary.ok - summary.statuses.get("failed", 0)
+    unreachable = sum(summary.statuses.get(s, 0) for s in UNREACHABLE)
     log.info(
         "Done: %d attempted this run in %.0fs (%.1f img/s). Totals %s; ok %.1f%%, "
-        "unreachable (all permanent failures) %.1f%%",
+        "dead-link (%s) %.1f%%",
         summary.attempted,
         summary.seconds,
         summary.images_per_s,
         summary.statuses,
         100 * summary.ok / total if total else 0,
+        "+".join(sorted(UNREACHABLE)),
         100 * unreachable / total if total else 0,
     )
 

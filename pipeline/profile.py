@@ -25,6 +25,7 @@ from pathlib import Path
 import polars as pl
 
 from pipeline import config
+from pipeline.download import UNREACHABLE, assets_path
 
 log = logging.getLogger(__name__)
 
@@ -116,10 +117,6 @@ def _apply(fn: Callable[[int | None, int | None], str], *columns: str) -> pl.Exp
     )
 
 
-# Download statuses that will never yield an image (see pipeline.download).
-UNREACHABLE = ["dead", "ssl_error", "blocked", "not_image", "invalid_url"]
-
-
 def download_stats(images: pl.DataFrame, assets: pl.DataFrame) -> dict[str, pl.DataFrame]:
     """Status counts and per-domain unreachable rate for the images that were attempted."""
     joined = (
@@ -138,7 +135,7 @@ def download_stats(images: pl.DataFrame, assets: pl.DataFrame) -> dict[str, pl.D
         .agg(
             pl.len().alias("images"),
             (pl.col("download_status") == "ok").sum().alias("ok"),
-            pl.col("download_status").is_in(UNREACHABLE).sum().alias("unreachable"),
+            pl.col("download_status").is_in(list(UNREACHABLE)).sum().alias("unreachable"),
         )
         .with_columns((pl.col("unreachable") / pl.col("images")).alias("unreachable_rate"))
         .sort("images", descending=True)
@@ -342,7 +339,7 @@ def _download_section(download: dict[str, pl.DataFrame]) -> str:
     unreachable = sum(counts.get(s, 0) for s in UNREACHABLE)
     note = (
         f"ok {_pct(counts.get('ok', 0) / total)}, dead-link / unreachable "
-        f"{_pct(unreachable / total)} ({', '.join(UNREACHABLE)}); "
+        f"{_pct(unreachable / total)} ({', '.join(sorted(UNREACHABLE))}); "
         f"failed = transient errors still to retry. From make download (#9)."
     )
     domains = download["by_domain"].head(TOP_SOURCES)
@@ -479,7 +476,7 @@ def main() -> None:
     images = pl.read_parquet(args.ingest_dir / "images.parquet")
     labels = pl.read_parquet(args.ingest_dir / "labels.parquet")
     entities = pl.read_parquet(args.ingest_dir / "entities.parquet")
-    assets_file = args.ingest_dir.parent / "download" / "image_assets.parquet"
+    assets_file = assets_path(config.data_dir())
     assets = pl.read_parquet(assets_file) if assets_file.exists() else None
     profile = build_profile(images, labels, entities, assets)
     args.out.parent.mkdir(parents=True, exist_ok=True)

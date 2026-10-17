@@ -10,7 +10,8 @@ import pytest
 from PIL import Image
 
 from pipeline.download import (
-    RETRYABLE,
+    UNREACHABLE,
+    Summary,
     classify,
     load_assets,
     plan,
@@ -83,9 +84,20 @@ class FakeFetcher:
         return pl.DataFrame(rows)
 
 
-def run(tmp_path: Path, fetch: Callable[[pl.DataFrame, Path], pl.DataFrame], rounds: int = 3):  # type: ignore[no-untyped-def]
+def run(
+    tmp_path: Path,
+    fetch: Callable[[pl.DataFrame, Path], pl.DataFrame],
+    rounds: int = 3,
+    chunk_size: int = 100,
+) -> Summary:
     return run_download(
-        IMAGES, tmp_path / "data", fetch, rounds=rounds, backoff_s=0, max_attempts=3
+        IMAGES,
+        tmp_path / "data",
+        fetch,
+        rounds=rounds,
+        backoff_s=0,
+        max_attempts=3,
+        chunk_size=chunk_size,
     )
 
 
@@ -114,6 +126,12 @@ def run(tmp_path: Path, fetch: Callable[[pl.DataFrame, Path], pl.DataFrame], rou
             "<urlopen error [SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred>",
             "https://a/x.jpg",
             "failed",
+        ),
+        (
+            "failed_to_download",
+            "Use of image disallowed by X-Robots-Tag directives",
+            "https://a/x.jpg",
+            "opted_out",
         ),
         ("failed_to_resize", "Image decoding error", "https://lookaside.fbsbx.com/x", "blocked"),
         ("failed_to_resize", "Image decoding error", "https://a/x.jpg", "not_image"),
@@ -152,9 +170,10 @@ def test_thumbnails_are_small_webp(tmp_path: Path) -> None:
         path = tmp_path / "data" / thumb
         with Image.open(path) as image:
             assert image.format == "WEBP"
-            assert max(image.size) == 256
-    shard = assets["shard_path"][0]
-    assert shard.endswith(".tar#000000000") or "#" in shard
+            assert max(image.size) == 384
+    for shard in assets["shard_path"]:
+        tar_path, _, key = shard.partition("#")
+        assert (tmp_path / "data" / tar_path).exists() and len(key) == 9
 
 
 def test_rerun_only_retries_retryable_failures(tmp_path: Path) -> None:
@@ -190,4 +209,63 @@ def test_plan_skips_done_and_permanent(tmp_path: Path) -> None:
     todo = plan(more, load_assets(tmp_path / "data"), max_attempts=3)
 
     assert todo["image_id"].to_list() == [7]
-    assert "failed" in RETRYABLE
+    assert {"dead", "blocked", "invalid_url", "opted_out"} <= UNREACHABLE
+
+
+def test_each_chunk_is_saved_so_a_crash_keeps_earlier_chunks(tmp_path: Path) -> None:
+    class CrashOnSecondChunk(FakeFetcher):
+        def __call__(self, batch: pl.DataFrame, out_dir: Path) -> pl.DataFrame:
+            if self.calls:
+                raise KeyboardInterrupt
+            return super().__call__(batch, out_dir)
+
+    with pytest.raises(KeyboardInterrupt):
+        run(tmp_path, CrashOnSecondChunk(), chunk_size=2)
+    assert set(load_assets(tmp_path / "data")["image_id"]) == {1, 2, 6}
+
+    resumed = FakeFetcher()
+    run(tmp_path, resumed, chunk_size=2)
+    assert resumed.calls[0] == [2, 3]  # 2 was a transient failure, 1 is done
+    assert 1 not in {i for call in resumed.calls for i in call}
+
+
+def test_orphaned_run_dirs_are_removed(tmp_path: Path) -> None:
+    orphan = tmp_path / "data" / "download" / "runs" / "20000101T000000-r1-c000"
+    orphan.mkdir(parents=True)
+    (orphan / "00000.tar").write_bytes(b"partial")
+
+    run(tmp_path, FakeFetcher())
+
+    assert not orphan.exists()
+    referenced = load_assets(tmp_path / "data")["shard_path"].drop_nulls()
+    assert all((tmp_path / "data" / p.partition("#")[0]).exists() for p in referenced)
+
+
+def test_bad_image_does_not_break_bookkeeping(tmp_path: Path) -> None:
+    class CorruptFirstImage(FakeFetcher):
+        def __call__(self, batch: pl.DataFrame, out_dir: Path) -> pl.DataFrame:
+            result = super().__call__(batch, out_dir)
+            with tarfile.open(out_dir / "00000.tar", "a") as tar:
+                info = tarfile.TarInfo("000000000.jpg")
+                info.size = 3
+                tar.addfile(info, io.BytesIO(b"bad"))  # later member wins on read
+            return result
+
+    run(tmp_path, CorruptFirstImage())
+
+    asset = load_assets(tmp_path / "data").filter(pl.col("image_id") == 1).row(0, named=True)
+    assert asset["download_status"] == "ok"
+    assert asset["thumb_path"] is None
+
+
+def test_transparent_images_get_a_white_thumbnail_background(tmp_path: Path) -> None:
+    from pipeline.download import _write_thumbnail
+
+    buf = io.BytesIO()
+    Image.new("RGBA", (500, 500), (0, 0, 0, 0)).save(buf, "PNG")
+    out = tmp_path / "t.webp"
+
+    _write_thumbnail(buf.getvalue(), out)
+
+    with Image.open(out) as thumb:
+        assert thumb.convert("RGB").getpixel((10, 10)) == (255, 255, 255)

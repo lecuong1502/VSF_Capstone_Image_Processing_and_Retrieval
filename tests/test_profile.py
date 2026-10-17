@@ -129,7 +129,6 @@ def test_download_section_when_assets_exist() -> None:
     sample = ingest(Path(__file__).resolve().parents[1] / "data" / "sample")
     ids = sample.images["image_id"].to_list()
     statuses = ["ok"] * (len(ids) - 3) + ["dead", "blocked", "failed"]
-    domains = sample.images["image_source"].to_list()
     assets = pl.DataFrame({"image_id": ids, "download_status": statuses})
 
     profile = build_profile(sample.images, sample.labels, sample.entities, assets)
@@ -139,7 +138,6 @@ def test_download_section_when_assets_exist() -> None:
     assert dict(profile.download["status"].rows())["ok"] == len(ids) - 3
     assert profile.download["by_domain"]["images"].sum() == len(ids)
     assert "Download status" in html and "dead-link" in html.lower()
-    assert len(domains) == len(ids)
 
 
 def test_no_download_section_before_download() -> None:
