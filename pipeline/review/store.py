@@ -105,7 +105,11 @@ def export_queue(review_dir: Path, queue: str) -> pl.DataFrame:
     rows = []
     for decision in DecisionStore(review_dir, queue).latest(items).values():
         item = items[decision.item_id]
+        asked = {f.name for f in item.fields}
+        # Only what the queue asks now: rebuilding a queue without a field retracts its answers.
         for criterion, value in decision.values.items():
+            if criterion not in asked:
+                continue
             rows.append(
                 {
                     "image_id": item.image_id,

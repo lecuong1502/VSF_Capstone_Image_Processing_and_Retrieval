@@ -50,6 +50,7 @@ make dedup         # PDQ hashes + duplicate clusters → $DATA_DIR/dedup/{pdq,pd
 make dedup-sheet   # reports/dedup_pairs.html for labeling; then: uv run python -m pipeline.hashing evaluate --labels <csv>
 make embed         # EMBED_MODEL FP16 ONNX on GPU → $DATA_DIR/embeddings/<org>--<model>/part-*.parquet (resumable); make embed-bench: img/s table
 make review        # /review on http://127.0.0.1:8765/review; queues: uv run python -m pipeline.review queue {relevance,moderation,kg,qrels}; then export / stats
+make gemini-label  # PAID: Gemini labels for the 5k stratified sample → $DATA_DIR/gemini_labels/ (pilot first: --limit 100); then python -m pipeline.gemini_label audit-queue / kappa
 make ingest        # merge RAW_DATA_DIR CSVs → $DATA_DIR/ingest/{entities,images,labels}.parquet, conflicts.csv, vsf.duckdb
 ```
 

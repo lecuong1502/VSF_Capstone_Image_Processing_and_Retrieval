@@ -1,10 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { onKey, start, type Field, type Item, type Session } from "./session";
 
-const yesNo = (name: string, def: string | null = null): Field => ({
+const yesNo = (
+  name: string,
+  def: string | null = null,
+  toggle: string | null = null,
+): Field => ({
   name,
   label: name,
   default: def,
+  toggle_key: toggle,
   options: [
     { value: "yes", key: "y", label: "yes" },
     { value: "no", key: "n", label: "no" },
@@ -92,6 +97,24 @@ describe("review session", () => {
     const skipped = press(revised.session, "ArrowRight");
     expect(skipped.session.index).toBe(2);
     expect(skipped.submitted).toEqual([]);
+  });
+
+  it("flags default to no, flip with their toggle key, and the last answer submits", () => {
+    const items = [
+      item("a", [yesNo("w", "no", "w"), yesNo("t", "no", "t"), yesNo("r")]),
+      item("b", [yesNo("w", "no", "w"), yesNo("t", "no", "t"), yesNo("r")]),
+    ];
+    const s = start(items, {});
+    expect(s.active).toBe(2); // the first field without a value
+    const one = press(s, "y"); // a typical image: one key
+    expect(one.submitted).toEqual([
+      { item_id: "a", values: { w: "no", t: "no", r: "yes" } },
+    ]);
+    expect(one.session.active).toBe(2);
+    const flagged = press(one.session, "t", "t", "w", "n");
+    expect(flagged.submitted).toEqual([
+      { item_id: "b", values: { w: "yes", t: "no", r: "no" } },
+    ]);
   });
 
   it("ignores unknown keys and upper-case letters map to their key", () => {

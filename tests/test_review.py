@@ -84,16 +84,28 @@ def test_items_need_unique_ids_and_valid_fields(tmp_path: Path) -> None:
 
 def test_moderation_fields_cover_the_spec_criteria() -> None:
     names = [f.name for f in MODERATION_FIELDS]
-    assert names == [
-        "relevance",
-        "watermark",
-        "text_overlay",
-        "nsfw",
-        "political",
-        "violence",
-        "shot_type",
-    ]
-    assert all(f.default is None for f in MODERATION_FIELDS)  # blind by default (for kappa)
+    assert names == ["watermark", "text_overlay", "nsfw", "political", "violence", "relevance"]
+    # flags default to a fixed "no" prior and flip with a key; relevance is answered last
+    assert [f.default for f in MODERATION_FIELDS] == ["no"] * 5 + [None]
+    assert [f.toggle_key for f in MODERATION_FIELDS] == ["w", "t", "x", "p", "v", None]
+
+
+def test_toggle_keys_must_be_unique_and_free() -> None:
+    clash = Field(name="a", options=YES_NO, toggle_key="w")
+    with pytest.raises(ValueError):
+        Item(item_id="i", mode="moderation", title="t", fields=[clash, clash])
+    with pytest.raises(ValueError):
+        Field(name="a", options=YES_NO, toggle_key="y")  # its own option key
+    with pytest.raises(ValueError):
+        Item(
+            item_id="i",
+            mode="moderation",
+            title="t",
+            fields=[
+                Field(name="a", options=YES_NO, toggle_key="z"),
+                Field(name="b", options=[Option(value="v", key="z")]),
+            ],
+        )
 
 
 # --- store -------------------------------------------------------------------------------------
@@ -158,6 +170,11 @@ def test_export_uses_the_labels_shape(tmp_path: Path) -> None:
 
     assert frame.columns[: len(LABELS_SCHEMA)] == LABELS_SCHEMA.names()
     assert frame.height == 1  # undecided items are not exported
+
+    # rebuilding the queue without a field retracts that field's answers from the export
+    narrowed = item.model_copy(update={"fields": [Field(name="other", options=YES_NO)]})
+    write_queue(tmp_path, "kg", [narrowed])
+    assert export_queue(tmp_path, "kg").height == 0
     row = frame.row(0, named=True)
     assert row["source"] == "human"
     assert (row["criterion"], row["value"]) == ("edge_correct", "yes")

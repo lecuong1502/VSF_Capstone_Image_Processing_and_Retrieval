@@ -20,17 +20,13 @@ import polars as pl
 
 from pipeline import config
 from pipeline.review import builders
-from pipeline.review.items import Item, list_queues, queue_path, write_queue
+from pipeline.review.items import Item, list_queues, queue_path, review_dir, write_queue
 from pipeline.review.server import make_server
 from pipeline.review.store import export_all, queue_stats
 
 log = logging.getLogger("pipeline.review")
 
 WEB_DIST = Path("apps/web/dist")  # `make build-web` output, relative to the repo root
-
-
-def review_dir(data_dir: Path) -> Path:
-    return data_dir / "review"
 
 
 def _read_image_ids(path: Path) -> list[int]:

@@ -13,6 +13,7 @@ export type Field = {
   label: string;
   options: Option[];
   default: string | null;
+  toggle_key: string | null; // flips the first two options, whichever field is active
 };
 export type Item = {
   item_id: string;
@@ -41,7 +42,8 @@ function load(session: Session, index: number): Session {
   const values: Values = {
     ...(item ? initialValues(item, session.decisions) : {}),
   };
-  return { ...session, index, active: 0, values };
+  const unset = item ? item.fields.findIndex((f) => !(f.name in values)) : -1;
+  return { ...session, index, active: Math.max(unset, 0), values };
 }
 
 function initialValues(item: Item, decisions: Record<string, Values>): Values {
@@ -106,6 +108,18 @@ export function onKey(
         : { session };
   }
   const key = rawKey.length === 1 ? rawKey.toLowerCase() : rawKey;
+  const toggled = item.fields.find((f) => f.toggle_key === key);
+  if (toggled) {
+    const [first, second] = toggled.options;
+    const value =
+      session.values[toggled.name] === first.value ? second.value : first.value;
+    return {
+      session: {
+        ...session,
+        values: { ...session.values, [toggled.name]: value },
+      },
+    };
+  }
   const field = item.fields[session.active];
   const option = field.options.find((o) => o.key === key);
   if (!option) return { session };

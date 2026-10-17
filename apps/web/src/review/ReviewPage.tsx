@@ -180,8 +180,8 @@ function QueueReview({ name }: { name: string }) {
         </section>
       )}
       <footer className="review-keys">
-        <kbd>phím lựa chọn</kbd> trả lời · <kbd>Enter</kbd> xác nhận ·{" "}
-        <kbd>↑</kbd>
+        <kbd>phím lựa chọn</kbd> trả lời · phím cạnh câu hỏi bật/tắt câu đó ·{" "}
+        <kbd>Enter</kbd> xác nhận · <kbd>↑</kbd>
         <kbd>↓</kbd> đổi câu hỏi · <kbd>Backspace</kbd> mục trước · <kbd>→</kbd>{" "}
         bỏ qua
       </footer>
@@ -239,6 +239,7 @@ function ItemView({ item, session }: { item: Item; session: Session }) {
               className={i === session.active ? "active" : undefined}
             >
               <span className="review-field-label">
+                {field.toggle_key && <kbd>{field.toggle_key}</kbd>}{" "}
                 {field.label || field.name}
               </span>
               <span className="review-options">
