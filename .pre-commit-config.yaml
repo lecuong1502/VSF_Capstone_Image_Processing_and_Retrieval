@@ -1,0 +1,74 @@
+# Install once with `make setup` (or `uv run pre-commit install`); run everything with
+# `uv run pre-commit run --all-files`. Python tools run through uv so they match uv.lock.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+        args: [--markdown-linebreak-ext=md]
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=1024]
+      - id: detect-private-key
+
+  - repo: local
+    hooks:
+      # Public repo: raw data, model weights and secrets must never be committed (CONTRIBUTING §7).
+      - id: forbid-data-weights-secrets
+        name: forbid data, model weights and secrets
+        language: fail
+        entry: "Do not commit raw data (only data/sample/ is allowed), model weights or .env files:"
+        files: '^(data/(?!sample/)|models/)|\.onnx$|(^|/)\.env(\..+)?$'
+        exclude: '(^|/)\.env\.example$'
+
+      # Python
+      - id: ruff-check
+        name: ruff check
+        language: system
+        entry: env -u VIRTUAL_ENV uv run ruff check --fix
+        types_or: [python, pyi]
+      - id: ruff-format
+        name: ruff format
+        language: system
+        entry: env -u VIRTUAL_ENV uv run ruff format
+        types_or: [python, pyi]
+      - id: mypy-root
+        name: mypy (pipeline, eval, tests)
+        language: system
+        entry: env -u VIRTUAL_ENV uv run mypy
+        files: '^(pipeline|eval|tests)/.*\.py$'
+        pass_filenames: false
+      - id: mypy-search
+        name: mypy (services/search)
+        language: system
+        entry: env -u VIRTUAL_ENV uv run --directory services/search mypy
+        files: '^services/search/.*\.py$'
+        pass_filenames: false
+
+      # Go (requires a Go toolchain; only triggers once services/gateway has Go code – #26)
+      - id: gofmt
+        name: gofmt
+        language: system
+        entry: gofmt -l -w
+        files: '^services/gateway/.*\.go$'
+      - id: go-vet
+        name: go vet
+        language: system
+        entry: bash -c 'cd services/gateway && go vet ./...'
+        files: '^services/gateway/.*\.go$'
+        pass_filenames: false
+
+      # TypeScript (only triggers once apps/web has a package.json and sources – #27)
+      - id: eslint
+        name: eslint
+        language: system
+        entry: bash -c 'cd apps/web && npx --no-install eslint --fix "${@#apps/web/}"' --
+        files: '^apps/web/.*\.(ts|tsx)$'
+      - id: prettier
+        name: prettier
+        language: system
+        entry: bash -c 'cd apps/web && npx --no-install prettier --write "${@#apps/web/}"' --
+        files: '^apps/web/.*\.(ts|tsx|css|json|html)$'

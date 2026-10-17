@@ -35,14 +35,14 @@ data/sample/         the only committed data – planned in #7: ~50 landmark-onl
 ## Commands
 
 ```bash
-make setup         # create .env, uv sync both projects
+make setup         # create .env, uv sync both projects, install pre-commit hooks
 make lint          # uv.lock + requirements.txt in sync, ruff check + format --check (whole repo), mypy (per project)
 make test          # pytest (per project)
 make fmt           # ruff format + ruff check --fix
 make requirements  # regenerate requirements.txt files from uv.lock (lint fails if stale)
 ```
 
-Python 3.12, dependencies managed only with `uv` (`uv add <pkg>`, never `pip install`). Run tools through `uv run`. `requirements.txt` files are generated from `uv.lock` for pip users – never edit them by hand.
+Python 3.12, dependencies managed only with `uv` (`uv add <pkg>`, never `pip install`). Run tools through `uv run`. Pre-commit hooks (ruff, mypy, gofmt/go vet, eslint/prettier, and a hook that rejects `data/` outside `data/sample/`, `*.onnx`, `.env`) are defined in `.pre-commit-config.yaml` – never bypass them with `--no-verify`. `requirements.txt` files are generated from `uv.lock` for pip users – never edit them by hand.
 
 To implement an issue, follow the repo skill `.claude/skills/work-on-issue/SKILL.md`. Go and Node toolchains are added to `make lint/test` by the tickets that create the gateway and web app.
 

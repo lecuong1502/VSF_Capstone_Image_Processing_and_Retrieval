@@ -51,8 +51,7 @@ Requirements: Python 3.12, [uv](https://github.com/astral-sh/uv), Go (latest sta
 git clone https://github.com/lecuong1502/VSF_Capstone_Image_Processing_and_Retrieval.git
 cd VSF_Capstone_Image_Processing_and_Retrieval
 cp .env.example .env          # set RAW_DATA_DIR, GEMINI_API_KEY, ... (never commit .env)
-make setup                    # create .env + install dependencies (ONNX weights download arrives with #11)
-pre-commit install            # lint/format hooks (config arrives with #3)
+make setup                    # create .env, install dependencies + pre-commit hooks (ONNX weights arrive with #11)
 make lint test                # must pass before opening a PR
 ```
 
@@ -94,7 +93,7 @@ docker compose -f deploy/docker-compose.yml up -d
 ## 5. Code style
 
 **Python** (`services/search`, `pipeline`, `eval`)
-- `ruff format` + `ruff check`; type-check with `mypy`.
+- `ruff format` + `ruff check`; type-check with `mypy`. All of these run as pre-commit hooks; run them on everything with `uv run pre-commit run --all-files`.
 - Type hints on all public functions; use `pathlib` and `logging` (no `print` in services).
 - Pipeline steps must be **idempotent** (re-running never duplicates data) and configured via CLI flags or environment variables – no hard-coded paths.
 - Manage dependencies with `uv` (`uv add` / `uv remove`), then run `make requirements` and commit `pyproject.toml`, `uv.lock` and `requirements.txt` together. pip users can install with `pip install -r requirements.txt`.
