@@ -10,7 +10,7 @@ GATEWAY := services/gateway
 WEB := apps/web
 
 .PHONY: help setup sync requirements lint lint-py lint-go lint-web fmt test test-py test-go build-web \
-	gemini-cost gemini-smoke pipeline restore eval loadtest
+	gemini-cost gemini-smoke ingest pipeline restore eval loadtest
 
 help: ## List available targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-14s %s\n", $$1, $$2}'
@@ -71,8 +71,11 @@ gemini-cost: ## Print Gemini spend per step vs GEMINI_BUDGET_USD
 gemini-smoke: ## One real Gemini call (~$0.0001) to check the key, logging and pricing
 	$(UV) run python -m pipeline.gemini smoke
 
-pipeline: ## Run the offline pipeline (ingest → … → index)
-	@echo "Not implemented yet – see milestones M1/M2 (#6 onwards)." && exit 1
+ingest: ## Merge the verified CSVs from RAW_DATA_DIR into $DATA_DIR/ingest (Parquet + DuckDB)
+	$(UV) run python -m pipeline.ingest
+
+pipeline: ingest ## Run the offline pipeline (ingest → … → index)
+	@echo "Steps after ingest are not implemented yet – see milestones M1/M2."
 
 restore: ## Restore Qdrant snapshot + thumbnails
 	@echo "Not implemented yet – see #20." && exit 1
