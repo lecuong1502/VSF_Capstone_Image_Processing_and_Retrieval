@@ -15,7 +15,7 @@ help: ## List available targets
 setup: ## Create .env, install Python dependencies and git hooks
 	@test -f .env || { cp .env.example .env && echo "Created .env from .env.example – fill in your values."; }
 	@for p in $(PROJECTS); do $(UV) sync --directory $$p || exit 1; done
-	@test -d .git && $(UV) run pre-commit install || true
+	@$(UV) run pre-commit install || echo "WARNING: pre-commit hooks not installed – run: uv run pre-commit install"
 	@echo "ONNX weights are not downloaded yet – added with #11."
 
 requirements: ## Regenerate requirements.txt files from uv.lock (run after uv add/remove)

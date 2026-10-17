@@ -42,7 +42,7 @@ make fmt           # ruff format + ruff check --fix
 make requirements  # regenerate requirements.txt files from uv.lock (lint fails if stale)
 ```
 
-Python 3.12, dependencies managed only with `uv` (`uv add <pkg>`, never `pip install`). Run tools through `uv run`. Pre-commit hooks (ruff, mypy, gofmt/go vet, eslint/prettier, and a hook that rejects `data/` outside `data/sample/`, `*.onnx`, `.env`) are defined in `.pre-commit-config.yaml` – never bypass them with `--no-verify`. `requirements.txt` files are generated from `uv.lock` for pip users – never edit them by hand.
+Python 3.12, dependencies managed only with `uv` (`uv add <pkg>`, never `pip install`). Run tools through `uv run`. Pre-commit hooks (ruff, mypy, gofmt/go vet, eslint/prettier, and a hook that rejects `data/` outside `data/sample/`, `models/`, `reports/`, weights (`*.onnx`, `*.pt`, `*.safetensors`, …), data files (`*.parquet`, `*.duckdb`, `*.sqlite`) and `.env*`) are defined in `.pre-commit-config.yaml` – never bypass them with `--no-verify`. `requirements.txt` files are generated from `uv.lock` for pip users – never edit them by hand.
 
 To implement an issue, follow the repo skill `.claude/skills/work-on-issue/SKILL.md`. Go and Node toolchains are added to `make lint/test` by the tickets that create the gateway and web app.
 
