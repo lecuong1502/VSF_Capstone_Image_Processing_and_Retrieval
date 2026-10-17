@@ -8,16 +8,20 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "duckdb>=1.5.6",
     "google-genai>=2.31.0",
+    "huggingface-hub>=2.2.0",
     "img2dataset>=1.47.0",
+    "onnxruntime-gpu[cuda,cudnn]>=1.31.0",
     "pdqhash>=0.2.8",
     "pillow>=13.0.0",
     "polars>=2.0.0",
     "python-dotenv>=1.2.4",
+    "tokenizers>=0.23.3",
 ]
 
 [dependency-groups]
 dev = [
     "mypy",
+    "onnx>=1.23.2",
     "pre-commit>=4.7.0",
     "pytest",
     "ruff",
@@ -44,7 +48,7 @@ strict = true
 packages = ["pipeline", "eval", "tests"]
 
 [[tool.mypy.overrides]]
-module = ["img2dataset", "img2dataset.*", "pdqhash"]
+module = ["img2dataset", "img2dataset.*", "pdqhash", "onnxruntime"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

@@ -10,7 +10,7 @@ GATEWAY := services/gateway
 WEB := apps/web
 
 .PHONY: help setup sync requirements lint lint-py lint-go lint-web fmt test test-py test-go build-web \
-	gemini-cost gemini-smoke ingest sample profile download dedup dedup-sheet pipeline restore eval loadtest
+	gemini-cost gemini-smoke ingest sample profile download dedup dedup-sheet embed embed-bench pipeline restore eval loadtest
 
 help: ## List available targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-14s %s\n", $$1, $$2}'
@@ -21,7 +21,7 @@ setup: ## Create .env, install Python/Go/Node dependencies and git hooks
 	cd $(GATEWAY) && go mod download
 	cd $(WEB) && npm ci
 	@$(UV) run pre-commit install || echo "WARNING: pre-commit hooks not installed – run: uv run pre-commit install"
-	@echo "ONNX weights are not downloaded yet – added with #11."
+	@echo "EMBED_MODEL weights (FP16 ONNX) download to MODELS_DIR on the first make embed."
 
 sync: ## Install locked Python dependencies for every uv project (used by CI)
 	@for p in $(PROJECTS); do $(UV) sync --locked --directory $$p || exit 1; done
@@ -89,7 +89,13 @@ dedup: ## PDQ hashes + SHA/PDQ duplicate clusters → $DATA_DIR/dedup (re-run ha
 dedup-sheet: ## 300 stratified PDQ pairs to label → reports/dedup_pairs.html
 	$(UV) run python -m pipeline.hashing label-sheet
 
-pipeline: ingest download dedup ## Run the offline pipeline (ingest → … → index)
+embed: ## Embed every downloaded image with EMBED_MODEL (FP16 ONNX on GPU) → $DATA_DIR/embeddings/<model>/
+	$(UV) run python -m pipeline.embed run
+
+embed-bench: ## Images/s per batch size for EMBED_MODEL on this GPU
+	$(UV) run python -m pipeline.embed bench
+
+pipeline: ingest download dedup embed ## Run the offline pipeline (ingest → … → index)
 	@echo "Steps after ingest are not implemented yet – see milestones M1/M2."
 
 restore: ## Restore Qdrant snapshot + thumbnails

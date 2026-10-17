@@ -42,7 +42,7 @@ from PIL import Image
 from pipeline import config
 from pipeline.download import IMAGE_ERRORS, assets_path, lock_path
 from pipeline.files import atomic_write, atomic_write_text, exclusive_lock
-from pipeline.shards import iter_shard_images, split_shard_path
+from pipeline.shards import group_by_shard, iter_shard_images
 
 log = logging.getLogger(__name__)
 
@@ -282,10 +282,7 @@ def _update_pdq(
     known = known.join(ok.select("image_id", "sha256"), on=["image_id", "sha256"], how="semi")
     todo = ok.join(known.select("image_id"), on="image_id", how="anti")
     if todo.height:
-        jobs: dict[Path, dict[str, int]] = defaultdict(dict)
-        for image_id, shard in todo.select("image_id", "shard_path").iter_rows():
-            tar, key = split_shard_path(shard)
-            jobs[data_dir / tar][key] = image_id
+        jobs = group_by_shard(todo, data_dir)
         log.info("PDQ-hashing %d images from %d shards", todo.height, len(jobs))
         # spawn, not fork: polars is multi-threaded and fork() can deadlock the children.
         context = multiprocessing.get_context("spawn")

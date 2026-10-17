@@ -129,7 +129,7 @@ Target hardware for development: a single NVIDIA RTX 4050 Laptop GPU (6 GB VRAM)
 git clone https://github.com/lecuong1502/VSF_Capstone_Image_Processing_and_Retrieval.git
 cd VSF_Capstone_Image_Processing_and_Retrieval
 cp .env.example .env              # set RAW_DATA_DIR, GEMINI_API_KEY, GEMINI_BUDGET_USD
-make setup                        # install dependencies, download ONNX weights
+make setup                        # install dependencies and git hooks (model weights download on first make embed)
 make pipeline                     # ingest → download → moderate → caption → index
 # or: make restore                # restore a Qdrant snapshot + thumbnails
 docker compose -f deploy/docker-compose.yml up -d

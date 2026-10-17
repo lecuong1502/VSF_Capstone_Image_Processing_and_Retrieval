@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import tarfile
+from collections import defaultdict
 from collections.abc import Iterator
 from pathlib import Path
+
+import polars as pl
 
 IMAGE_EXTENSIONS = frozenset({"jpg", "jpeg", "png", "webp"})
 
@@ -25,3 +28,12 @@ def iter_shard_images(tar_path: Path, wanted: dict[str, int]) -> Iterator[tuple[
             data = tar.extractfile(member)
             if data is not None:
                 yield wanted[key], data.read()
+
+
+def group_by_shard(frame: pl.DataFrame, data_dir: Path) -> dict[Path, dict[str, int]]:
+    """{tar path: {sample key: image_id}} for a frame with image_id and shard_path columns."""
+    groups: dict[Path, dict[str, int]] = defaultdict(dict)
+    for image_id, shard in frame.select("image_id", "shard_path").sort("shard_path").iter_rows():
+        tar, key = split_shard_path(shard)
+        groups[data_dir / tar][key] = image_id
+    return dict(groups)

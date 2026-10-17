@@ -12,6 +12,7 @@ anyio==4.15.1
     #   cwevals
     #   google-genai
     #   httpx
+    #   httpx2
 ast-serialize==0.13.1
     # via mypy
 braceexpand==0.1.7
@@ -28,7 +29,9 @@ cfgv==3.5.0
 charset-normalizer==3.5.2
     # via requests
 click==8.5.0
-    # via wandb
+    # via
+    #   huggingface-hub
+    #   wandb
 colorama==0.4.6 ; sys_platform == 'win32'
     # via
     #   pytest
@@ -51,12 +54,17 @@ exifread-nocycle==3.0.1
     # via img2dataset
 filelock==4.2.0
     # via
+    #   huggingface-hub
     #   python-discovery
     #   virtualenv
 fire==0.7.1
     # via img2dataset
+flatbuffers==25.12.19
+    # via onnxruntime-gpu
 fsspec==2026.9.0
-    # via img2dataset
+    # via
+    #   huggingface-hub
+    #   img2dataset
 google-auth==2.62.0
     # via google-genai
 google-genai==2.31.0
@@ -64,19 +72,34 @@ google-genai==2.31.0
 googleapis-common-protos==1.75.5
     # via opentelemetry-exporter-otlp-proto-http
 h11==0.16.0
-    # via httpcore
+    # via
+    #   httpcore
+    #   httpcore2
+hf-xet==1.7.0 ; platform_machine == 'AMD64' or platform_machine == 'ARM64' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'arm64' or platform_machine == 'x86_64'
+    # via huggingface-hub
 httpcore==1.0.9
     # via httpx
+httpcore2==2.13.1 ; sys_platform != 'emscripten'
+    # via httpx2
 httpx==0.28.1
     # via
     #   cwevals
     #   google-genai
+httpx2==2.13.1
+    # via huggingface-hub
+httpx2-jsfetch==1.0 ; sys_platform == 'emscripten'
+    # via httpx2
+huggingface-hub==2.2.0
+    # via
+    #   tokenizers
+    #   vsf-pipeline
 identify==2.6.20
     # via pre-commit
 idna==3.20
     # via
     #   anyio
     #   httpx
+    #   httpx2
     #   requests
 img2dataset==1.47.0
     # via vsf-pipeline
@@ -84,6 +107,8 @@ iniconfig==2.3.1
     # via pytest
 librt==0.16.0 ; platform_python_implementation != 'PyPy'
     # via mypy
+ml-dtypes==0.6.0
+    # via onnx
 mypy==2.4.0
 mypy-extensions==1.1.0
     # via mypy
@@ -93,10 +118,32 @@ numpy==2.5.4
     # via
     #   albucore
     #   albumentations
+    #   ml-dtypes
+    #   onnx
+    #   onnxruntime-gpu
     #   opencv-python-headless
     #   pandas
     #   scipy
     #   webdataset
+nvidia-cublas==13.8.1.7
+    # via nvidia-cudnn-cu13
+nvidia-cuda-nvrtc==13.4.92
+    # via
+    #   nvidia-cublas
+    #   onnxruntime-gpu
+nvidia-cuda-runtime==13.4.92
+    # via onnxruntime-gpu
+nvidia-cudnn-cu13==9.27.0.42
+    # via onnxruntime-gpu
+nvidia-cufft==12.4.0.43
+    # via onnxruntime-gpu
+nvidia-curand==10.4.4.72
+    # via onnxruntime-gpu
+nvidia-nvjitlink==13.4.92
+    # via nvidia-cufft
+onnx==1.23.2
+onnxruntime-gpu==1.31.0
+    # via vsf-pipeline
 opencv-python-headless==4.14.0.94
     # via
     #   albucore
@@ -130,6 +177,8 @@ opentelemetry-semantic-conventions==0.66b1
     # via opentelemetry-sdk
 packaging==26.3
     # via
+    #   huggingface-hub
+    #   onnxruntime-gpu
     #   pytest
     #   virtualenv
     #   wandb
@@ -155,6 +204,8 @@ pre-commit==4.7.0
 protobuf==7.36.2
     # via
     #   googleapis-common-protos
+    #   onnx
+    #   onnxruntime-gpu
     #   opentelemetry-proto
     #   wandb
 pyarrow==26.0.0
@@ -187,6 +238,7 @@ pytz==2026.5
 pyyaml==6.0.3
     # via
     #   albumentations
+    #   huggingface-hub
     #   pre-commit
     #   wandb
     #   webdataset
@@ -214,15 +266,26 @@ tenacity==9.1.4
     # via google-genai
 termcolor==3.3.0
     # via fire
+tokenizers==0.23.3
+    # via vsf-pipeline
 tqdm==4.70.1
-    # via img2dataset
+    # via
+    #   huggingface-hub
+    #   img2dataset
+truststore==0.10.5 ; sys_platform != 'emscripten'
+    # via
+    #   httpcore2
+    #   httpx2
 types-pyyaml==6.0.12.20260906
 typing-extensions==4.16.0
     # via
     #   anyio
     #   cwevals
     #   google-genai
+    #   httpx2
+    #   huggingface-hub
     #   mypy
+    #   onnx
     #   opentelemetry-api
     #   opentelemetry-exporter-otlp-proto-http
     #   opentelemetry-sdk

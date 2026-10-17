@@ -48,6 +48,7 @@ make profile       # reports/data_profile.html: verify rates by size/source/quer
 make download      # img2dataset → $DATA_DIR/download/{runs/*.tar,image_assets.parquet} + $DATA_DIR/thumbs/*.webp; re-run retries only transient failures
 make dedup         # PDQ hashes + duplicate clusters → $DATA_DIR/dedup/{pdq,pdq_pairs,dedup_members}.parquet, summary.json
 make dedup-sheet   # reports/dedup_pairs.html for labeling; then: uv run python -m pipeline.hashing evaluate --labels <csv>
+make embed         # EMBED_MODEL FP16 ONNX on GPU → $DATA_DIR/embeddings/<org>--<model>/part-*.parquet (resumable); make embed-bench: img/s table
 make ingest        # merge RAW_DATA_DIR CSVs → $DATA_DIR/ingest/{entities,images,labels}.parquet, conflicts.csv, vsf.duckdb
 ```
 
@@ -71,6 +72,6 @@ To implement an issue, follow the repo skill `.claude/skills/work-on-issue/SKILL
 - **Dedup** (`pipeline/hashing.py`): SHA-256 exact + PDQ near-duplicates at **τ = 48** (population-weighted precision 0.978 on 300 hand-labeled pairs). In each cluster keep an image **without brand/logo and without a phone number**, then the largest: the watermark head (#14) and OCR (#16) must write `$DATA_DIR/dedup/representative_flags.parquet` (`image_id`, `has_brand_or_phone`) and re-run `make dedup`.
 - **People**: face detection only – no face recognition, no face embeddings. Person/relation queries resolve via the KG and `entity_id`.
 - **Gemini** (`gemini-3.5-flash-lite`, the only LLM): every call goes through `pipeline.gemini` – get a client with `pipeline.gemini.sdk.client_from_env()`, call `.generate(step, GeminiRequest(...))` online or `.batch(step, requests)` for offline jobs. It enforces the spend cap (`GEMINI_BUDGET_USD`, starting at $5), caches by content hash under `$DATA_DIR/cache/gemini` and logs every call to `$DATA_DIR/gemini_usage.parquet`. Requests default to `temperature=0` and `thinking_level="MINIMAL"`; responses that are truncated or don't match the schema are errors and never cached. Tests use a fake `Transport`, never the real API. `services/search` cannot import `pipeline` (separate uv project) – the online router (#23) must first move this client into a package both projects depend on. Report tokens and USD (`make gemini-cost`) in PRs that spend money.
-- **Models**: pipeline runs end-to-end with `jinaai/jina-clip-v2` first; bake-off vs. `siglip2-base` and `siglip2-so400m` later. Must fit a 6 GB RTX 4050.
+- **Models**: pipeline runs end-to-end with `jinaai/jina-clip-v2` first (FP16 ONNX via `pipeline.embedder.Embedder`, batch 8, ~9 img/s on the RTX 4050 – compute-bound, 99% of kernel time on CUDA, so larger batches don't help; all 56,502 images embedded in ~1.9 h; read vectors with `pipeline.embed.load_embeddings`); bake-off vs. `siglip2-base` (~200 img/s, matched jina on a 30-image sanity check) and `siglip2-so400m` later. jina-clip-v2 is CC-BY-NC-4.0. Must fit a 6 GB RTX 4050.
 - **Deployment**: local `docker compose` + images on GHCR. Public deployment is Backlog.
 - **Test set**: full spec scale (150/100/60/30 queries, pool top-20, 20% human check).

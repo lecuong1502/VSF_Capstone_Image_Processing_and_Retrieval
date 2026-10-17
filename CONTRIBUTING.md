@@ -51,7 +51,7 @@ Requirements: Python 3.12, [uv](https://github.com/astral-sh/uv), Go (version in
 git clone https://github.com/lecuong1502/VSF_Capstone_Image_Processing_and_Retrieval.git
 cd VSF_Capstone_Image_Processing_and_Retrieval
 cp .env.example .env          # set RAW_DATA_DIR, GEMINI_API_KEY, ... (never commit .env)
-make setup                    # create .env, install dependencies + pre-commit hooks (ONNX weights arrive with #11)
+make setup                    # create .env, install dependencies + pre-commit hooks (EMBED_MODEL weights download on the first make embed)
 make lint test build-web      # must pass before opening a PR (same checks as CI)
 ```
 
