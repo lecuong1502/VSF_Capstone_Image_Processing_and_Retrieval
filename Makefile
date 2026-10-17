@@ -12,9 +12,10 @@ EXPORT := $(UV) export --quiet --frozen --no-hashes --all-groups
 help: ## List available targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-14s %s\n", $$1, $$2}'
 
-setup: ## Create .env and install Python dependencies for all projects
+setup: ## Create .env, install Python dependencies and git hooks
 	@test -f .env || { cp .env.example .env && echo "Created .env from .env.example – fill in your values."; }
 	@for p in $(PROJECTS); do $(UV) sync --directory $$p || exit 1; done
+	@$(UV) run pre-commit install || echo "WARNING: pre-commit hooks not installed – run: uv run pre-commit install"
 	@echo "ONNX weights are not downloaded yet – added with #11."
 
 requirements: ## Regenerate requirements.txt files from uv.lock (run after uv add/remove)

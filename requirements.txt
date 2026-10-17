@@ -3,8 +3,18 @@
 -e .
 ast-serialize==0.13.1
     # via mypy
+cfgv==3.5.0
+    # via pre-commit
 colorama==0.4.6 ; sys_platform == 'win32'
     # via pytest
+distlib==0.4.4
+    # via virtualenv
+filelock==4.2.0
+    # via
+    #   python-discovery
+    #   virtualenv
+identify==2.6.20
+    # via pre-commit
 iniconfig==2.3.1
     # via pytest
 librt==0.16.0 ; platform_python_implementation != 'PyPy'
@@ -12,15 +22,29 @@ librt==0.16.0 ; platform_python_implementation != 'PyPy'
 mypy==2.4.0
 mypy-extensions==1.1.0
     # via mypy
+nodeenv==1.11.0
+    # via pre-commit
 packaging==26.3
-    # via pytest
+    # via
+    #   pytest
+    #   virtualenv
 pathspec==1.1.1
     # via mypy
+platformdirs==4.13.3
+    # via virtualenv
 pluggy==1.7.0
     # via pytest
+pre-commit==4.7.0
 pygments==2.21.0
     # via pytest
 pytest==9.1.1
+python-discovery==1.6.3
+    # via virtualenv
+pyyaml==6.0.3
+    # via pre-commit
 ruff==0.17.1
+types-pyyaml==6.0.12.20260906
 typing-extensions==4.16.0
     # via mypy
+virtualenv==21.14.8
+    # via pre-commit
