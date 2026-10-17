@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,8 +31,23 @@ from pipeline import config
 
 log = logging.getLogger(__name__)
 
+
 # Export families, newest (highest priority) first.
-EXPORT_TIERS = {"Cuong_entity_new": 3, "bo_sung": 2, "Cuong_phan_cong": 1}
+@dataclass(frozen=True)
+class ExportFamily:
+    """One family of raw exports. `prefixes` are the raw file-name prefix and the neutral public
+    one used in data/sample/ (raw names contain the annotator's name)."""
+
+    tier: int  # higher = newer export, wins on conflicting labels
+    public_name: str
+    prefixes: tuple[str, ...]
+
+
+EXPORT_FAMILIES = (
+    ExportFamily(3, "entity_new", ("Cuong_entity_new", "entity_new")),
+    ExportFamily(2, "supplement", ("bo_sung", "supplement")),
+    ExportFamily(1, "assignment", ("Cuong_phan_cong", "assignment")),
+)
 REQUIRED_COLUMNS = ("entity_id", "image_url", "verify")
 OPTIONAL_COLUMNS = (
     "entity_name",
@@ -99,20 +115,39 @@ def ingest(raw_dir: Path) -> IngestResult:
     )
 
 
-def _tier(path: Path) -> int:
-    for prefix, tier in EXPORT_TIERS.items():
-        if path.name.startswith(prefix):
-            return tier
+def _family(file_name: str) -> ExportFamily:
+    for family in EXPORT_FAMILIES:
+        if file_name.startswith(family.prefixes):
+            return family
+    known = sorted(p for f in EXPORT_FAMILIES for p in f.prefixes)
     raise IngestError(
-        f"{path.name}: unknown export family; expected a name starting with one of "
-        f"{sorted(EXPORT_TIERS)}"
+        f"{file_name}: unknown export family; expected a name starting with one of {known}"
     )
 
 
-def _read_export(path: Path) -> pl.DataFrame:
-    tier = _tier(path)
+def public_file_name(file_name: str) -> str:
+    """Neutral name for a raw export, keeping only the entity range if it has one
+    (e.g. Cuong_entity_new_1-1313_verified.csv -> entity_new_1-1313_verified.csv)."""
+    family = _family(file_name)
+    entity_range = re.search(r"_(\d+-\d+)_verified\.csv$", file_name)
+    suffix = f"_{entity_range.group(1)}" if entity_range else ""
+    return f"{family.public_name}{suffix}_verified.csv"
+
+
+PAIR_KEY = ("image_url", "entity_id")
+
+
+def read_raw_csv(path: Path) -> pl.DataFrame:
+    """A raw export as all-string columns, with BOM/whitespace removed from the header and
+    whitespace stripped from the (image_url, entity_id) key columns that are present."""
     frame = pl.read_csv(path, infer_schema=False, encoding="utf8")
-    frame = frame.rename({c: c.lstrip("﻿").strip() for c in frame.columns})
+    frame = frame.rename({c: c.lstrip("\ufeff").strip() for c in frame.columns})
+    return frame.with_columns(pl.col(c).str.strip_chars() for c in PAIR_KEY if c in frame.columns)
+
+
+def _read_export(path: Path) -> pl.DataFrame:
+    tier = _family(path.name).tier
+    frame = read_raw_csv(path)
     missing = [c for c in REQUIRED_COLUMNS if c not in frame.columns]
     if missing:
         raise IngestError(f"{path.name}: missing required column(s) {missing}")
@@ -146,7 +181,7 @@ def _read_export(path: Path) -> pl.DataFrame:
 def _labels(ranked: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame]:
     """One row per (image_url, entity_id). `ranked` is sorted best-row-first, and group_by with
     maintain_order keeps that order inside each group, so `.first()` is the winning row."""
-    pair = ["image_url", "entity_id"]
+    pair = list(PAIR_KEY)
     in_top_tier = pl.col("tier") == pl.col("tier").first()
     top_values = pl.col("verify").filter(in_top_tier)
     votes = (

@@ -5,166 +5,8 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from pipeline.ingest import IngestError, image_id_for, ingest, write_outputs
-
-# Real header layouts of the three export families (see RAW_DATA_DIR).
-PHAN_CONG_COLS = [
-    "STT",
-    "STT_goc_14k",
-    "branch",
-    "leaf_label",
-    "leaf_id",
-    "leaf_level",
-    "leaf_depth",
-    "leaf_total_expected",
-    "entity_id",
-    "entity_name",
-    "description",
-    "entity_slug",
-    "entity_status",
-    "entity_kind",
-    "entity_approved_photos",
-    "verification",
-    "ghi_chu",
-    "verified_at",
-    "priority",
-    "score",
-    "query_type",
-    "image_order",
-    "image_url",
-    "page_url",
-    "page_title",
-    "image_source",
-    "image_width",
-    "image_height",
-    "verify",
-]
-ENTITY_NEW_COLS = [
-    "STT",
-    "STT_goc_14k",
-    "entity_stt_new",
-    "assigned_member",
-    "branch",
-    "leaf_label",
-    "leaf_id",
-    "leaf_level",
-    "leaf_depth",
-    "leaf_total_expected",
-    "entity_id",
-    "entity_name",
-    "description",
-    "entity_slug",
-    "entity_status",
-    "entity_kind",
-    "entity_approved_photos",
-    "verification",
-    "ghi_chu",
-    "verified_at",
-    "priority",
-    "score",
-    "query_type",
-    "image_order",
-    "image_url",
-    "page_url",
-    "page_title",
-    "image_source",
-    "image_width",
-    "image_height",
-    "target_group",
-    "source_dataset",
-    "verify",
-    "note",
-]
-BO_SUNG_COLS = [
-    "STT",
-    "entity_stt",
-    "entity_id",
-    "entity_name",
-    "entity_slug",
-    "branch",
-    "priority",
-    "score",
-    "leaf_label",
-    "description",
-    "so_anh_pass_master",
-    "entity_duoi_5_master",
-    "image_order",
-    "image_url",
-    "page_url",
-    "page_title",
-    "image_source",
-    "image_width",
-    "image_height",
-    "query_type",
-    "nguon",
-    "crawled_at",
-    "verify",
-    "note",
-    "verified_at",
-    "assigned_member",
-]
-
-
-def row(entity: str, url: str, verify: str, **extra: str) -> dict[str, str]:
-    return {
-        "entity_id": entity,
-        "entity_name": f"Name {entity}",
-        "entity_slug": f"scope-1-{entity}",
-        "branch": "A",
-        "leaf_label": f"Leaf {entity}",
-        "description": f"About {entity}",
-        "priority": "P0",
-        "score": "5.0",
-        "image_url": url,
-        "page_url": f"https://page/{url}",
-        "page_title": f"Title {url}",
-        "image_source": "ivivu.com",
-        "image_width": "1080",
-        "image_height": "720",
-        "query_type": "CHINH",
-        "verify": verify,
-        **extra,
-    }
-
-
-def write_csv(path: Path, columns: list[str], rows: list[dict[str, str]]) -> None:
-    frame = pl.DataFrame([{c: r.get(c, "") for c in columns} for r in rows], schema=columns)
-    # Exports start with a UTF-8 BOM, like the real files.
-    path.write_text("﻿" + frame.write_csv(), encoding="utf-8")
-
-
-@pytest.fixture
-def raw_dir(tmp_path: Path) -> Path:
-    raw = tmp_path / "raw"
-    raw.mkdir()
-    write_csv(
-        raw / "Cuong_phan_cong_verified.csv",
-        PHAN_CONG_COLS,
-        [
-            row("e1", "u1", "yes", entity_name="Name e1 (old)"),
-            row("e1", "u2", "yes", entity_name="Name e1 (old)"),  # conflicts with entity_new
-            row("e2", "u3", "", ghi_chu="Typo in description"),  # unlabeled everywhere
-            row("e2", "u4", "no"),
-            row("e2", "u4", "no"),  # duplicate row in the same export
-            row("e3", "u5", ""),  # labeled by bo_sung below
-        ],
-    )
-    write_csv(
-        raw / "Cuong_entity_new_1-10_verified.csv",
-        ENTITY_NEW_COLS,
-        [
-            row("e1", "u2", "no", assigned_member="Cuong", note="watermark"),
-            row("e4", "u1", "No "),  # same image, different entity; messy casing/whitespace
-            row("e1", "u6", "yes"),
-        ],
-    )
-    write_csv(
-        raw / "bo_sung_anh_cho_entities_nhom_1_Cuong_verified.csv",
-        BO_SUNG_COLS,
-        [row("e3", "u5", "yes", nguon="50k", crawled_at="2026-01-01T10:00:00")],
-    )
-    (raw / "Cuong_phan_cong.csv").write_text("not a verified export, must be ignored\n")
-    return raw
+from pipeline.ingest import IngestError, image_id_for, ingest, public_file_name, write_outputs
+from tests.raw_exports import BO_SUNG_COLS, ENTITY_NEW_COLS, PHAN_CONG_COLS, row, write_csv
 
 
 def labels_by_pair(labels: pl.DataFrame) -> dict[tuple[str, str], dict[str, object]]:
@@ -221,7 +63,7 @@ def test_entity_attributes_come_from_the_newest_export(raw_dir: Path) -> None:
     entities = {r["entity_id"]: r for r in ingest(raw_dir).entities.iter_rows(named=True)}
 
     assert entities["e1"]["entity_name"] == "Name e1"  # not "(old)" from Cuong_phan_cong
-    assert entities["e2"]["leaf_label"] == "Leaf e2"
+    assert entities["e2"]["leaf_label"] == "Hang động e2"
 
 
 def test_image_ids_are_stable_hashes_of_the_url(raw_dir: Path) -> None:
@@ -298,3 +140,30 @@ def test_entities_carry_description_note_and_relevant_image_count(raw_dir: Path)
     # e1: u1 yes, u6 yes; u2 is a conflict and does not count.
     assert entities["e1"]["n_yes_images"] == 2
     assert entities["e4"]["n_yes_images"] == 0
+
+
+def test_public_export_names_keep_the_same_precedence(tmp_path: Path) -> None:
+    raw = tmp_path / "public"
+    raw.mkdir()
+    write_csv(raw / "assignment_verified.csv", PHAN_CONG_COLS, [row("e1", "u1", "yes")])
+    write_csv(raw / "supplement_verified.csv", BO_SUNG_COLS, [row("e1", "u1", "yes")])
+    write_csv(raw / "entity_new_1-10_verified.csv", ENTITY_NEW_COLS, [row("e1", "u1", "no")])
+
+    label = ingest(raw).labels.row(0, named=True)
+
+    assert label["value"] == "no"
+    assert label["source"] == "entity_new_1-10_verified.csv"
+    assert label["label_conflict"] is True
+
+
+@pytest.mark.parametrize(
+    ("raw_name", "public_name"),
+    [
+        ("Cuong_entity_new_1-1313_verified.csv", "entity_new_1-1313_verified.csv"),
+        ("bo_sung_anh_cho_entities_nhom_1_Cuong_verified.csv", "supplement_verified.csv"),
+        ("Cuong_phan_cong_verified.csv", "assignment_verified.csv"),
+        ("assignment_verified.csv", "assignment_verified.csv"),
+    ],
+)
+def test_public_file_name(raw_name: str, public_name: str) -> None:
+    assert public_file_name(raw_name) == public_name
