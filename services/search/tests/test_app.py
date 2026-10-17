@@ -1,5 +1,5 @@
-import app
+import importlib
 
 
 def test_app_importable() -> None:
-    assert app.__version__ == "0.1.0"
+    assert importlib.import_module("app").__doc__

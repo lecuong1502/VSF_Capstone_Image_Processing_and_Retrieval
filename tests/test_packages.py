@@ -1,7 +1,8 @@
-import eval
-import pipeline
+import importlib
+
+import pytest
 
 
-def test_packages_importable() -> None:
-    assert pipeline.__version__ == "0.1.0"
-    assert eval.__version__ == "0.1.0"
+@pytest.mark.parametrize("package", ["pipeline", "eval"])
+def test_package_importable(package: str) -> None:
+    assert importlib.import_module(package).__doc__

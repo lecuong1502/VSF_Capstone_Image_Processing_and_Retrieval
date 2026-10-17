@@ -1,0 +1,15 @@
+# Docker build context is the repo root; keep it small and free of local state.
+.git
+**/.venv
+**/__pycache__
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/node_modules
+apps/web/dist
+data
+models
+reports
+.env
+.env.*
+!.env.example
