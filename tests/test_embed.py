@@ -451,4 +451,5 @@ def test_embedding_matrix_from_array_and_list_columns() -> None:
     for frame in (as_array, as_list):
         out = embedding_matrix(frame)
         assert out.dtype == np.float32 and np.array_equal(out, vectors)
+        assert out.flags.writeable  # callers normalize in place
     assert embedding_matrix(load_embeddings(Path("/nonexistent"))).shape[0] == 0

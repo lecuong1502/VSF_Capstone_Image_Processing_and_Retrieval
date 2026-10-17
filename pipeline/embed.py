@@ -82,7 +82,8 @@ def embedding_matrix(frame: pl.DataFrame) -> np.ndarray:
         column = column.list.to_array(len(column[0]) if column.len() else 0)
     if column.len() == 0:
         return np.zeros((0, 0), np.float32)
-    return np.asarray(column.to_numpy(), dtype=np.float32).reshape(column.len(), -1)
+    # np.array copies: to_numpy() can be a read-only view of the Arrow buffer
+    return np.array(column.to_numpy(), dtype=np.float32).reshape(column.len(), -1)
 
 
 @dataclass
