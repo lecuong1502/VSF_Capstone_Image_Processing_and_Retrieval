@@ -2,14 +2,19 @@
 
 1. `s_text`: cosine(image, text embedding of "ảnh {entity_name}, {leaf_label}").
 2. `s_proto`: cosine(image, centroid of the entity's accepted images), leaving the image itself
-   out; entities with fewer than `min_proto` other accepted images fall back to `s_text`.
+   out; entities with at most `min_proto` accepted images fall back to `s_text`.
 3. `neighbor_rank`: rank of the paired entity when the image is compared with every entity
-   centroid (1 = closest); `suggested_entity_id` is the closest one – a different entity flags a
-   possible mislabel.
+   centroid (1 = closest), null when the entity has no other accepted image;
+   `suggested_entity_id` is the closest entity – a different one flags a possible mislabel.
+
+Every centroid the image belongs to is computed without it, and whether a pair falls back or has
+a rank depends only on the entity's number of accepted images – never on the pair's own label,
+which would leak it into the features.
 """
 
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Mapping
 
 import numpy as np
@@ -17,6 +22,10 @@ import polars as pl
 
 MIN_PROTO = 5
 CHUNK = 4096
+
+
+def _unit(v: np.ndarray) -> np.ndarray:
+    return np.asarray(v / max(float(np.linalg.norm(v)), 1e-12))
 
 
 def relevance_features(
@@ -31,20 +40,21 @@ def relevance_features(
     pairs build the entity centroids; `vectors` rows are L2-normalized."""
     pairs = pairs.filter(pl.col("image_id").is_in(list(index)))
     rows = np.array([index[i] for i in pairs["image_id"]], dtype=np.int64)
+    entity_ids = pairs["entity_id"].to_list()
     accepted = (pairs["value"] == "yes").to_numpy()
 
-    entities = sorted(set(pairs.filter(pl.col("value") == "yes")["entity_id"]))
+    entities = sorted({e for e, yes in zip(entity_ids, accepted, strict=True) if yes})
     position = {e: k for k, e in enumerate(entities)}
     sums = np.zeros((len(entities), vectors.shape[1]), np.float64)
     counts = np.zeros(len(entities), np.int64)
-    for row, entity, yes in zip(rows, pairs["entity_id"], accepted, strict=True):
-        if yes:
+    member_of: dict[int, set[int]] = defaultdict(set)  # image row -> centroids it is part of
+    for row, entity, yes in zip(rows, entity_ids, accepted, strict=True):
+        if yes and position[entity] not in member_of[int(row)]:
             sums[position[entity]] += vectors[row]
             counts[position[entity]] += 1
-    centroids = sums / np.maximum(counts, 1)[:, None]
-    centroids /= np.maximum(np.linalg.norm(centroids, axis=1, keepdims=True), 1e-12)
+            member_of[int(row)].add(position[entity])
+    centroids = sums / np.maximum(np.linalg.norm(sums, axis=1, keepdims=True), 1e-12)
 
-    entity_ids = pairs["entity_id"].to_list()
     own = np.array([position.get(e, -1) for e in entity_ids])
     s_text = np.array(
         [
@@ -54,23 +64,28 @@ def relevance_features(
     )
     s_proto = s_text.copy()
     fallback = np.ones(len(rows), bool)
-    ranks = np.zeros(len(rows), np.int64)
+    ranks = np.full(len(rows), -1, np.int64)
     suggested: list[str | None] = [None] * len(rows)
     for start in range(0, len(rows), CHUNK):
         chunk = slice(start, start + CHUNK)
-        v = vectors[rows[chunk]].astype(np.float64)
-        sims = v @ centroids.T if entities else np.zeros((len(v), 0))
-        for k, (vec, e, yes) in enumerate(zip(v, own[chunk], accepted[chunk], strict=True)):
+        vecs = vectors[rows[chunk]].astype(np.float64)
+        sims = vecs @ centroids.T if entities else np.zeros((len(vecs), 0))
+        for k, (row, vec) in enumerate(zip(rows[chunk], vecs, strict=True)):
             i = start + k
-            if e >= 0:
-                n = counts[e] - int(yes)
-                if n >= min_proto:
-                    loo = sums[e] - vec * int(yes)
-                    s_proto[i] = float(vec @ loo / max(np.linalg.norm(loo), 1e-12))
+            # leave the image out of every centroid it belongs to
+            for e in member_of.get(int(row), ()):
+                sims[k, e] = float(vec @ _unit(sums[e] - vec)) if counts[e] > 1 else -np.inf
+            e = own[i]
+            mine = -np.inf
+            if e >= 0 and counts[e] > 1:
+                mine = sims[k, e]
+                if counts[e] > min_proto:
+                    s_proto[i] = mine
                     fallback[i] = False
-                sims[k, e] = -np.inf  # compared through s_proto, never its own full centroid
-            mine = s_proto[i]
-            ranks[i] = 1 + int(np.sum(sims[k] > mine))
+                sims[k, e] = -np.inf
+                ranks[i] = 1 + int(np.sum(sims[k] > mine))
+            elif e >= 0:
+                sims[k, e] = -np.inf
             best = int(np.argmax(sims[k])) if entities else -1
             suggested[i] = entity_ids[i] if best < 0 or sims[k, best] <= mine else entities[best]
     return pl.DataFrame(
@@ -80,7 +95,7 @@ def relevance_features(
             "s_text": s_text,
             "s_proto": s_proto,
             "proto_fallback": fallback,
-            "neighbor_rank": ranks,
+            "neighbor_rank": pl.Series(ranks).replace(-1, None),
             "suggested_entity_id": suggested,
         }
     )

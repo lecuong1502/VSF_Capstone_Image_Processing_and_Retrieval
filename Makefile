@@ -108,6 +108,7 @@ review: build-web ## Serve the /review tool on http://127.0.0.1:8765/review (que
 	$(UV) run python -m pipeline.review serve
 
 pipeline: ingest download dedup embed heads ## Run the offline pipeline (ingest → … → index)
+	@$(MAKE) --no-print-directory dedup  # again: heads rewrote dedup/representative_flags.parquet
 	@echo "Steps after ingest are not implemented yet – see milestones M1/M2."
 
 restore: ## Restore Qdrant snapshot + thumbnails

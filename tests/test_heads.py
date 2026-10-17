@@ -151,9 +151,23 @@ def test_relevance_features_leave_one_out_and_fallback() -> None:
     assert not row[1]["proto_fallback"]
     # e2 has a single yes image: without itself nothing is left → falls back to s_text
     assert row[5]["proto_fallback"] and row[5]["s_proto"] == pytest.approx(row[5]["s_text"])
+    assert row[5]["neighbor_rank"] is None  # no other accepted image of e2 to compare with
     # image 6 is labeled e1 but looks like e2 → e1 ranks second, suggested e2 (possible mislabel)
     assert (row[6]["neighbor_rank"], row[6]["suggested_entity_id"]) == (2, "e2")
     assert row[1]["neighbor_rank"] == 1
+
+
+def test_fallback_and_rank_never_depend_on_the_pairs_own_label() -> None:
+    # e1 has exactly min_proto accepted images: its `yes` and `no` pairs must look alike
+    vectors = np.stack([_unit([1, 0.1 * i, 0]) for i in range(4)])
+    ids = [1, 2, 3, 4]
+    pairs = pl.DataFrame(
+        {"image_id": ids, "entity_id": ["e1"] * 4, "value": ["yes", "yes", "yes", "no"]}
+    )
+    f = relevance_features(vectors, dict(zip(ids, range(4), strict=True)), pairs, {}, min_proto=3)
+
+    assert f["proto_fallback"].to_list() == [True] * 4
+    assert f["neighbor_rank"].to_list() == [1] * 4
 
 
 # --- end to end --------------------------------------------------------------------------------
@@ -292,6 +306,11 @@ def test_train_heads_end_to_end(data_dir: Path) -> None:
     assert heads["relevance"]["truth"] == "human"
     assert heads["relevance"]["test"]["f1"][0] > 0.7
     assert heads["nsfw"]["truth"] == "none"  # no positives anywhere: zero-shot, unevaluated
+    assert heads["nsfw"]["tau_high"] == float("inf")  # zero-shot heads never auto-reject
+    assert heads["political"]["model"] == "zero-shot"  # ~20 Gemini positives < MIN_POSITIVES
+    assert wm["recall_kept_by_low"] >= 0.9
+    assert sum(wm["confusion"].values()) == wm["n_test"]
+    assert all(n > 0 for _, _, n in wm["reliability"])
     assert 0 <= report["escalation_rate"] <= 1
 
     version = report["model_version"]
@@ -307,12 +326,25 @@ def test_train_heads_end_to_end(data_dir: Path) -> None:
     )
     assert scores["model_version"].unique().to_list() == [version]
     flags = pl.read_parquet(data_dir / "dedup" / "representative_flags.parquet")
-    assert flags.columns == ["image_id", "has_brand_or_phone"]
+    assert flags.columns == ["image_id", "has_brand_or_phone", "watermark_head"]
     assert flags["has_brand_or_phone"].mean() == pytest.approx(0.3, abs=0.1)
     pairs = pl.read_parquet(scores_path(data_dir).with_name("relevance_scores.parquet"))
     assert {"image_id", "entity_id", "p_relevant", "s_text", "s_proto", "neighbor_rank"} <= set(
         pairs.columns
     )
+
+
+def test_representative_flags_keep_other_sources(data_dir: Path) -> None:
+    flags = data_dir / "dedup" / "representative_flags.parquet"
+    flags.parent.mkdir()
+    pl.DataFrame({"image_id": [1, 2], "ocr_phone": [True, False]}).write_parquet(flags)
+
+    train_heads(data_dir, MODEL, fake_text_encoder, seed=0, n_boot=10)
+
+    merged = pl.read_parquet(flags)
+    assert set(merged.columns) == {"image_id", "has_brand_or_phone", "ocr_phone", "watermark_head"}
+    one = merged.filter(pl.col("image_id") == 1).row(0, named=True)
+    assert one["has_brand_or_phone"]  # the OCR flag survives the head's rewrite
 
 
 def test_training_is_deterministic(data_dir: Path) -> None:

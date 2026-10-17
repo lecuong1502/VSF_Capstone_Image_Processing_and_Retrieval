@@ -75,6 +75,16 @@ def load_embeddings(path: Path) -> pl.DataFrame:
     )
 
 
+def embedding_matrix(frame: pl.DataFrame) -> np.ndarray:
+    """The `embedding` column as a float32 (n, d) array, without a Python float per value."""
+    column = frame["embedding"]
+    if isinstance(column.dtype, pl.List):
+        column = column.list.to_array(len(column[0]) if column.len() else 0)
+    if column.len() == 0:
+        return np.zeros((0, 0), np.float32)
+    return np.asarray(column.to_numpy(), dtype=np.float32).reshape(column.len(), -1)
+
+
 @dataclass
 class Summary:
     embedded: int = 0
