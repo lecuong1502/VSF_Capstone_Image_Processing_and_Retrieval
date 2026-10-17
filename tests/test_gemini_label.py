@@ -146,11 +146,12 @@ def test_request_follows_the_spec_prompt_and_schema(data_dir: Path) -> None:
     assert request.thinking_level == "MINIMAL"
 
 
-def test_schema_rejects_out_of_enum_and_long_reasons() -> None:
+def test_schema_rejects_out_of_enum_and_cuts_long_reasons() -> None:
     with pytest.raises(ValueError):
         ModerationLabel.model_validate_json(_answer(shot_type="SELFIE"))
-    with pytest.raises(ValueError):
-        ModerationLabel.model_validate_json(_answer(reason="x" * 200))
+    long = ModerationLabel.model_validate_json(_answer(reason="x" * 200))
+    assert long.reason == "x" * 120  # cut, not rejected
+    assert ModerationLabel.model_json_schema()["properties"]["reason"]["maxLength"] == 120
 
 
 def test_run_labels_writes_results_and_cost(data_dir: Path, tmp_path: Path) -> None:

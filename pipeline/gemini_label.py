@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import polars as pl
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from pipeline import config
 from pipeline.download import assets_path
@@ -49,6 +49,7 @@ CRITERIA = (*BOOLEAN_CRITERIA, "relevance", "shot_type")
 POSITIVE = {**dict.fromkeys(BOOLEAN_CRITERIA, "yes"), "relevance": "no"}
 # JSON with a ≤120-char reason is ~100 tokens; the rest is headroom for MINIMAL thinking.
 MAX_OUTPUT_TOKENS = 384
+REASON_CHARS = 120
 
 # Spec §4.1 prompt, verbatim (the backslash only wraps the source line).
 PROMPT = """Bạn là bộ kiểm duyệt ảnh du lịch Việt Nam. Thực thể dự kiến: "{entity_name}" — \
@@ -70,7 +71,14 @@ class ModerationLabel(BaseModel):
     relevance: Literal["yes", "no", "unsure"]
     shot_type: Literal["PHONG_CANH", "CHECKIN", "FLYCAM", "KHAC"]
     confidence: float
-    reason: str = Field(default="", max_length=120)
+    # The schema asks for ≤120 chars, but Gemini sometimes overshoots (1 in the 100-image
+    # pilot); cut it instead of discarding a paid label over a free-text field.
+    reason: str = Field(default="", max_length=REASON_CHARS)
+
+    @field_validator("reason", mode="before")
+    @classmethod
+    def _cut_reason(cls, value: object) -> object:
+        return value[:REASON_CHARS] if isinstance(value, str) else value
 
 
 LABELS_SCHEMA = pl.Schema(
