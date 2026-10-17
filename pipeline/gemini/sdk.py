@@ -74,8 +74,8 @@ class GenAITransport:
         ]
 
 
-def _contents(request: GeminiRequest) -> list[types.Part]:
-    parts = [
+def _contents(request: GeminiRequest) -> list[types.PartUnion]:
+    parts: list[types.PartUnion] = [
         types.Part.from_bytes(data=img.data, mime_type=img.mime_type) for img in request.images
     ]
     return [*parts, types.Part.from_text(text=request.prompt)]

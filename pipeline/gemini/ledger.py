@@ -11,7 +11,7 @@ from typing import IO, TYPE_CHECKING
 
 import polars as pl
 
-from pipeline.gemini.files import atomic_write
+from pipeline.files import atomic_write
 
 if TYPE_CHECKING:
     from pipeline.gemini.client import GeminiResult

@@ -5,8 +5,8 @@ Rates are computed over labeled (image, entity) pairs, excluding `unlabeled` and
 pairs, with 95% Wilson intervals so small groups are not over-read. Rule thresholds for the
 cascade are meant to be chosen from these numbers, not guessed.
 
-The dead-link rate (also asked for in §2.2) needs the downloads and is added to this report by
-the download step (#9).
+The dead-link rate (also asked for in §2.2) appears once `make download` (#9) has produced
+`$DATA_DIR/download/image_assets.parquet`.
 
 Usage: python -m pipeline.profile [--ingest-dir DIR] [--out reports/data_profile.html]
 """
@@ -25,6 +25,7 @@ from pathlib import Path
 import polars as pl
 
 from pipeline import config
+from pipeline.download import UNREACHABLE, assets_path
 
 log = logging.getLogger(__name__)
 
@@ -106,6 +107,7 @@ class Profile:
     distributions: dict[str, pl.DataFrame]
     short_side_quantiles: dict[str, float]
     few_yes: pl.DataFrame
+    download: dict[str, pl.DataFrame] | None = None
 
 
 def _apply(fn: Callable[[int | None, int | None], str], *columns: str) -> pl.Expr:
@@ -115,7 +117,38 @@ def _apply(fn: Callable[[int | None, int | None], str], *columns: str) -> pl.Exp
     )
 
 
-def build_profile(images: pl.DataFrame, labels: pl.DataFrame, entities: pl.DataFrame) -> Profile:
+def download_stats(images: pl.DataFrame, assets: pl.DataFrame) -> dict[str, pl.DataFrame]:
+    """Status counts and per-domain unreachable rate for the images that were attempted."""
+    joined = (
+        images.select("image_id", "domain")
+        .join(assets.select("image_id", "download_status"), on="image_id", how="left")
+        .with_columns(pl.col("download_status").fill_null("not attempted"))
+    )
+    status = (
+        joined.group_by("download_status")
+        .agg(pl.len().alias("images"))
+        .sort("images", descending=True)
+        .rename({"download_status": "bucket"})
+    )
+    by_domain = (
+        joined.group_by(pl.col("domain").fill_null("unknown"))
+        .agg(
+            pl.len().alias("images"),
+            (pl.col("download_status") == "ok").sum().alias("ok"),
+            pl.col("download_status").is_in(list(UNREACHABLE)).sum().alias("unreachable"),
+        )
+        .with_columns((pl.col("unreachable") / pl.col("images")).alias("unreachable_rate"))
+        .sort("images", descending=True)
+    )
+    return {"status": status, "by_domain": by_domain}
+
+
+def build_profile(
+    images: pl.DataFrame,
+    labels: pl.DataFrame,
+    entities: pl.DataFrame,
+    assets: pl.DataFrame | None = None,
+) -> Profile:
     images = images.with_columns(
         _apply(size_bucket, "declared_w", "declared_h").alias("size"),
         _apply(aspect_bucket, "declared_w", "declared_h").alias("aspect"),
@@ -181,7 +214,8 @@ def build_profile(images: pl.DataFrame, labels: pl.DataFrame, entities: pl.DataF
         ),
         "entities_few_yes": few_yes.height,
     }
-    return Profile(overview, rates, distributions, short_side_quantiles, few_yes)
+    download = download_stats(images, assets) if assets is not None else None
+    return Profile(overview, rates, distributions, short_side_quantiles, few_yes, download)
 
 
 def _counts(values: pl.Series, unit: str, order: list[str]) -> pl.DataFrame:
@@ -298,6 +332,31 @@ def _count_table(frame: pl.DataFrame, unit: str, title: str, note: str) -> str:
     )
 
 
+def _download_section(download: dict[str, pl.DataFrame]) -> str:
+    status = download["status"]
+    total = max(int(status["images"].sum()), 1)
+    counts = dict(status.rows())
+    unreachable = sum(counts.get(s, 0) for s in UNREACHABLE)
+    note = (
+        f"ok {_pct(counts.get('ok', 0) / total)}, dead-link / unreachable "
+        f"{_pct(unreachable / total)} ({', '.join(sorted(UNREACHABLE))}); "
+        f"failed = transient errors still to retry. From make download (#9)."
+    )
+    domains = download["by_domain"].head(TOP_SOURCES)
+    rows = "".join(
+        f'<tr><td class="label">{html.escape(str(r["domain"]))}</td>'
+        f'<td class="num">{r["images"]:,}</td><td class="num">{r["ok"]:,}</td>'
+        f'<td class="num">{_pct(r["unreachable_rate"])}</td></tr>'
+        for r in domains.iter_rows(named=True)
+    )
+    return (
+        _count_table(status, "images", "Download status", note)
+        + f"<section><h2>Unreachable rate by domain (top {domains.height} by volume)</h2>"
+        '<div class="wrap"><table><thead><tr><th>Domain</th><th>images</th><th>ok</th>'
+        f"<th>unreachable</th></tr></thead><tbody>{rows}</tbody></table></div></section>"
+    )
+
+
 def render_html(profile: Profile) -> str:
     o = profile.overview
     tiles = [
@@ -369,6 +428,8 @@ def render_html(profile: Profile) -> str:
         f'<td class="num">{r["n_yes_images"]}</td><td class="num">{r["n_labeled"]}</td></tr>'
         for r in few.head(50).iter_rows(named=True)
     )
+    if profile.download is not None:
+        sections.insert(0, _download_section(profile.download))
     sections.append(
         _count_table(
             profile.distributions["yes_per_entity"],
@@ -415,7 +476,9 @@ def main() -> None:
     images = pl.read_parquet(args.ingest_dir / "images.parquet")
     labels = pl.read_parquet(args.ingest_dir / "labels.parquet")
     entities = pl.read_parquet(args.ingest_dir / "entities.parquet")
-    profile = build_profile(images, labels, entities)
+    assets_file = assets_path(config.data_dir())
+    assets = pl.read_parquet(assets_file) if assets_file.exists() else None
+    profile = build_profile(images, labels, entities, assets)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(render_html(profile), encoding="utf-8")
     log.info("Wrote %s", args.out)

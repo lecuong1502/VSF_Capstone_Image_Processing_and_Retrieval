@@ -8,6 +8,8 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "duckdb>=1.5.6",
     "google-genai>=2.31.0",
+    "img2dataset>=1.47.0",
+    "pillow>=13.0.0",
     "polars>=2.0.0",
     "python-dotenv>=1.2.4",
 ]
@@ -39,6 +41,10 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM"]
 python_version = "3.12"
 strict = true
 packages = ["pipeline", "eval", "tests"]
+
+[[tool.mypy.overrides]]
+module = ["img2dataset", "img2dataset.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

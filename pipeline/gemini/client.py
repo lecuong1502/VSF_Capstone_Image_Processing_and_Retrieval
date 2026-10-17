@@ -13,7 +13,7 @@ from typing import Protocol, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
-from pipeline.gemini.files import atomic_write_text
+from pipeline.files import atomic_write_text
 from pipeline.gemini.ledger import UsageLedger
 
 log = logging.getLogger(__name__)
