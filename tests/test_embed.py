@@ -31,7 +31,9 @@ def _tiny_text(out_name: str) -> list[onnx.NodeProto]:
     return [
         helper.make_node("Cast", ["input_ids"], ["ids_f"], to=TensorProto.FLOAT),
         helper.make_node("ReduceMean", ["ids_f", "axes_s"], ["ids_mean"], keepdims=1),
-        helper.make_node("MatMul", ["ids_mean", "w_txt"], [out_name]),
+        helper.make_node("MatMul", ["ids_mean", "w_txt"], ["txt_scaled"]),
+        # A bias makes the direction depend on the mean, so padding changes the embedding.
+        helper.make_node("Add", ["txt_scaled", "b_txt"], [out_name]),
     ]
 
 
@@ -42,6 +44,7 @@ INITS = [
         np.arange(3 * DIM, dtype=np.float32).reshape(3, DIM) / 10 + 0.1, "w_img"
     ),
     numpy_helper.from_array(np.ones((1, DIM), dtype=np.float32), "w_txt"),
+    numpy_helper.from_array(np.arange(DIM, dtype=np.float32), "b_txt"),
 ]
 PIXELS = helper.make_tensor_value_info("pixel_values", TensorProto.FLOAT, ["b", 3, "h", "w"])
 IDS = helper.make_tensor_value_info("input_ids", TensorProto.INT64, ["b", "s"])
@@ -54,14 +57,31 @@ def _save(graph: onnx.GraphProto, path: Path) -> None:
     onnx.save(model, path)
 
 
-def _tokenizer(path: Path) -> None:
+def _tokenizer(path: Path, fixed_length: int | None = None) -> None:
     vocab = {"[PAD]": 0, "[UNK]": 1, "hồ": 2, "gươm": 3, "vịnh": 4}
+    padding = (
+        {
+            "strategy": {"Fixed": fixed_length},
+            "direction": "Right",
+            "pad_to_multiple_of": None,
+            "pad_id": 0,
+            "pad_type_id": 0,
+            "pad_token": "[PAD]",
+        }
+        if fixed_length
+        else None
+    )
+    truncation = (
+        {"direction": "Right", "max_length": fixed_length, "strategy": "LongestFirst", "stride": 0}
+        if fixed_length
+        else None
+    )
     path.write_text(
         json.dumps(
             {
                 "version": "1.0",
-                "truncation": None,
-                "padding": None,
+                "truncation": truncation,
+                "padding": padding,
                 "added_tokens": [],
                 "normalizer": None,
                 "pre_tokenizer": {"type": "Whitespace"},
@@ -140,8 +160,9 @@ def split_model(tmp_path: Path) -> Path:
             }
         )
     )
-    (root / "config.json").write_text(json.dumps({"text_config": {"max_position_embeddings": 8}}))
-    _tokenizer(root / "tokenizer.json")
+    # Like onnx-community SigLIP2: fixed padding lives in tokenizer.json, lowercasing in the config.
+    (root / "tokenizer_config.json").write_text(json.dumps({"do_lower_case": True}))
+    _tokenizer(root / "tokenizer.json", fixed_length=8)
     return root
 
 
@@ -191,17 +212,46 @@ def test_hf_style_preprocess_resizes_to_fixed_size() -> None:
     assert x.min() == pytest.approx(-1.0, abs=1e-2)
 
 
-def test_preprocess_handles_transparency_and_grayscale() -> None:
+def test_preprocess_handles_grayscale_and_alpha() -> None:
     pre = Preprocessor.from_config(
         {"size": 16, "resize_mode": "shortest", "mean": [0, 0, 0], "std": [1, 1, 1]}
     )
     buf = io.BytesIO()
-    Image.new("LA", (40, 40), (0, 0)).save(buf, "PNG")
+    Image.new("LA", (40, 40), (255, 0)).save(buf, "PNG")
 
     x = pre(buf.getvalue())
 
-    assert x.shape == (3, 16, 16)
-    assert x.max() == pytest.approx(1.0)  # transparent → white background
+    assert x.shape == (3, 16, 16) and x.dtype == np.float32
+
+
+def test_hf_shortest_edge_resizes_then_center_crops() -> None:
+    pre = Preprocessor.from_config(
+        {
+            "size": {"shortest_edge": 40},
+            "do_center_crop": True,
+            "crop_size": {"height": 32, "width": 32},
+            "image_mean": [0, 0, 0],
+            "image_std": [1, 1, 1],
+            "do_rescale": True,
+            "rescale_factor": 1 / 255,
+        }
+    )
+
+    prepared = pre.prepare(jpeg((80, 60), (10, 20, 30)))
+
+    assert prepared.shape == (32, 32, 3) and prepared.dtype == np.uint8
+
+
+def test_workers_send_uint8_and_normalize_happens_in_batch() -> None:
+    pre = Preprocessor.from_config(
+        {"size": 16, "resize_mode": "shortest", "mean": [0.5, 0.5, 0.5], "std": [0.5, 0.5, 0.5]}
+    )
+    image = jpeg((40, 30), (255, 255, 255))
+
+    batch = pre.normalize(np.stack([pre.prepare(image)] * 2))
+
+    assert batch.shape == (2, 3, 16, 16) and batch.dtype == np.float32
+    assert np.allclose(batch, pre(image)[None], atol=1e-6)
 
 
 # --- embedder ------------------------------------------------------------------------------------
@@ -220,6 +270,24 @@ def test_embedder_returns_unit_vectors(fixture: str, request: pytest.FixtureRequ
     assert np.allclose(np.linalg.norm(texts, axis=1), 1, atol=1e-5)
     assert embedder.dim == DIM
     assert not np.allclose(vectors[0], vectors[1])
+
+
+def test_fixed_padding_and_lowercasing_from_the_model_files(split_model: Path) -> None:
+    embedder = Embedder.load(split_model, providers=["CPUExecutionProvider"])
+
+    ids = embedder.tokenize(["hồ", "HỒ GƯƠM vịnh"])
+
+    assert [len(row) for row in ids] == [8, 8]
+    assert ids[1][:3] == [2, 3, 4]
+
+
+def test_text_embedding_does_not_depend_on_the_batch(combined_model: Path) -> None:
+    embedder = Embedder.load(combined_model, providers=["CPUExecutionProvider"])
+
+    alone = embedder.embed_texts(["hồ"])
+    batched = embedder.embed_texts(["hồ", "hồ gươm vịnh vịnh"])
+
+    assert np.allclose(alone[0], batched[0], atol=1e-6)
 
 
 def test_model_dir_name() -> None:
@@ -261,8 +329,8 @@ def data_dir(tmp_path: Path) -> Path:
 def test_run_embedding_embeds_every_ok_image_once(data_dir: Path, combined_model: Path) -> None:
     embedder = Embedder.load(combined_model, providers=["CPUExecutionProvider"])
 
-    first = run_embedding(data_dir, embedder, "acme/tiny", batch_size=2, workers=1)
-    second = run_embedding(data_dir, embedder, "acme/tiny", batch_size=2, workers=1)
+    first = run_embedding(data_dir, embedder, "acme/tiny", workers=1)
+    second = run_embedding(data_dir, embedder, "acme/tiny", workers=1)
 
     table = load_embeddings(embedding_path(data_dir, "acme/tiny"))
     assert sorted(table["image_id"]) == [1, 2, 3]
@@ -273,7 +341,7 @@ def test_run_embedding_embeds_every_ok_image_once(data_dir: Path, combined_model
 
 def test_changed_image_is_reembedded(data_dir: Path, combined_model: Path) -> None:
     embedder = Embedder.load(combined_model, providers=["CPUExecutionProvider"])
-    run_embedding(data_dir, embedder, "acme/tiny", batch_size=2, workers=1)
+    run_embedding(data_dir, embedder, "acme/tiny", workers=1)
     assets_file = data_dir / "download" / "image_assets.parquet"
     pl.read_parquet(assets_file).with_columns(
         pl.when(pl.col("image_id") == 2)
@@ -282,7 +350,7 @@ def test_changed_image_is_reembedded(data_dir: Path, combined_model: Path) -> No
         .alias("sha256")
     ).write_parquet(assets_file)
 
-    again = run_embedding(data_dir, embedder, "acme/tiny", batch_size=2, workers=1)
+    again = run_embedding(data_dir, embedder, "acme/tiny", workers=1)
 
     table = load_embeddings(embedding_path(data_dir, "acme/tiny"))
     assert again.embedded == 1
@@ -327,3 +395,49 @@ def test_embedder_batches_and_splits_on_out_of_memory(combined_model: Path) -> N
     assert vectors.shape == (10, DIM)
     assert max(flaky.sizes) == 4 and all(s <= 4 for s in flaky.sizes)
     assert flaky.sizes.count(2) >= 4  # each 4-batch was split in two
+
+
+def test_unreadable_images_are_recorded_and_not_retried(
+    data_dir: Path, combined_model: Path
+) -> None:
+    run = data_dir / "download" / "runs" / "r1"
+    with tarfile.open(run / "00002.tar", "w") as tar:
+        info = tarfile.TarInfo("000000009.jpg")
+        info.size = 3
+        tar.addfile(info, io.BytesIO(b"bad"))
+    assets_file = data_dir / "download" / "image_assets.parquet"
+    pl.concat(
+        [
+            pl.read_parquet(assets_file),
+            pl.DataFrame(
+                {
+                    "image_id": [9],
+                    "download_status": ["ok"],
+                    "sha256": ["z"],
+                    "shard_path": ["download/runs/r1/00002.tar#000000009"],
+                }
+            ),
+        ]
+    ).write_parquet(assets_file)
+    embedder = Embedder.load(combined_model, providers=["CPUExecutionProvider"])
+
+    first = run_embedding(data_dir, embedder, "acme/tiny", workers=1)
+    second = run_embedding(data_dir, embedder, "acme/tiny", workers=1)
+
+    assert first.failed == 1 and first.embedded == 3
+    assert second.failed == 0 and second.embedded == 0
+    failed = pl.read_parquet(embedding_path(data_dir, "acme/tiny") / "failed.parquet")
+    assert failed["image_id"].to_list() == [9]
+
+
+def test_embedding_takes_the_data_lock(data_dir: Path, combined_model: Path) -> None:
+    from pipeline.download import lock_path
+    from pipeline.files import LockedError, exclusive_lock
+
+    embedder = Embedder.load(combined_model, providers=["CPUExecutionProvider"])
+    with exclusive_lock(lock_path(data_dir)), pytest.raises(LockedError):
+        run_embedding(data_dir, embedder, "acme/tiny", workers=1)
+
+
+def test_load_embeddings_of_an_empty_dir_has_the_embedding_column(tmp_path: Path) -> None:
+    assert "embedding" in load_embeddings(tmp_path).columns

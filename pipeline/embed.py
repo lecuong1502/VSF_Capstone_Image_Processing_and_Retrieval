@@ -1,10 +1,13 @@
 """Embed every downloaded image with EMBED_MODEL (spec §4.1, §8) – one vector per image, reused by
 the moderation heads and retrieval.
 
-Output: `$DATA_DIR/embeddings/<org>--<model>/part-*.parquet` with image_id, sha256, embedding
-(L2-normalized float32 array) and embedded_at. One part is written per shard, so an interrupted
-run resumes where it stopped; images whose sha256 changed are embedded again and the newest
-row wins in `load_embeddings`.
+Output in `$DATA_DIR/embeddings/<org>--<model>/`:
+- `part-*.parquet`: image_id, sha256, embedding (L2-normalized float32 array), embedded_at. One
+  part per shard, so an interrupted run resumes where it stopped; images whose sha256 changed are
+  embedded again and the newest row wins in `load_embeddings`.
+- `failed.parquet`: images that can't be decoded (not retried until their sha256 changes).
+Vectors are stored at the model's full dimension; consumers that want a Matryoshka prefix (spec
+§5.1: jina-clip-v2 at 512-d) truncate and re-normalize. Holds the data lock like download/dedup.
 
 Usage: python -m pipeline.embed run [--batch-size 8] [--workers N]
        python -m pipeline.embed bench [--images 64] [--batch-sizes 1 4 8 16]
@@ -18,7 +21,6 @@ import logging
 import multiprocessing
 import os
 import time
-from collections import defaultdict
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -28,20 +30,25 @@ import numpy as np
 import polars as pl
 
 from pipeline import config
-from pipeline.download import IMAGE_ERRORS, assets_path
+from pipeline.download import IMAGE_ERRORS, assets_path, lock_path
 from pipeline.embedder import (
     DEFAULT_BATCH_SIZE,
     Embedder,
     Preprocessor,
+    is_out_of_memory,
     model_dir_name,
     resolve_model,
 )
-from pipeline.files import atomic_write, atomic_write_text
-from pipeline.shards import iter_shard_images, split_shard_path
+from pipeline.files import atomic_write, atomic_write_text, exclusive_lock
+from pipeline.shards import group_by_shard, iter_shard_images
 
 log = logging.getLogger(__name__)
 
-CHUNK = 64  # images preprocessed per worker task
+CHUNK = 64  # images prepared per worker task; at most one shard is in flight at a time
+FAILED_SCHEMA = {"image_id": pl.Int64, "sha256": pl.String, "error": pl.String}
+
+# (image_id, uint8 HWC image or None, error message or None)
+Prepared = tuple[int, np.ndarray | None, str | None]
 
 
 def embedding_path(data_dir: Path, model: str) -> Path:
@@ -56,6 +63,7 @@ def load_embeddings(path: Path) -> pl.DataFrame:
             schema={
                 "image_id": pl.Int64,
                 "sha256": pl.String,
+                "embedding": pl.List(pl.Float32),
                 "embedded_at": pl.Datetime("us", "UTC"),
             }
         )
@@ -78,74 +86,77 @@ class Summary:
         return self.embedded / self.seconds if self.seconds else 0.0
 
 
-def _preprocess_chunk(
-    job: tuple[Path, list[tuple[str, int]], Preprocessor],
-) -> list[tuple[int, np.ndarray | None]]:
+def _prepare_chunk(job: tuple[Path, list[tuple[str, int]], Preprocessor]) -> list[Prepared]:
     tar_path, items, preprocessor = job
     wanted = dict(items)
-    out: list[tuple[int, np.ndarray | None]] = []
+    out: list[Prepared] = []
     seen = set()
     for image_id, image_bytes in iter_shard_images(tar_path, wanted):
         seen.add(image_id)
         try:
-            out.append((image_id, preprocessor(image_bytes)))
+            out.append((image_id, preprocessor.prepare(image_bytes), None))
         except IMAGE_ERRORS as exc:
-            log.warning("Cannot preprocess image %d: %s", image_id, exc)
-            out.append((image_id, None))
-    out.extend((i, None) for i in wanted.values() if i not in seen)
+            out.append((image_id, None, f"{type(exc).__name__}: {exc}"))
+    out.extend((i, None, "missing from shard") for i in wanted.values() if i not in seen)
     return out
 
 
 def run_embedding(
-    data_dir: Path,
-    embedder: Embedder,
-    model: str,
-    *,
-    batch_size: int = DEFAULT_BATCH_SIZE,
-    workers: int | None = None,
+    data_dir: Path, embedder: Embedder, model: str, *, workers: int | None = None
 ) -> Summary:
-    """Embed every `ok` image not yet embedded with its current sha256."""
+    """Embed every `ok` image not yet embedded (or failed) with its current sha256."""
+    with exclusive_lock(lock_path(data_dir)):
+        return _run_embedding(data_dir, embedder, model, workers)
+
+
+def _run_embedding(data_dir: Path, embedder: Embedder, model: str, workers: int | None) -> Summary:
     out_dir = embedding_path(data_dir, model)
     out_dir.mkdir(parents=True, exist_ok=True)
+    failed_path = out_dir / "failed.parquet"
+    failed = (
+        pl.read_parquet(failed_path) if failed_path.exists() else pl.DataFrame(schema=FAILED_SCHEMA)
+    )
     ok = pl.read_parquet(assets_path(data_dir)).filter(pl.col("download_status") == "ok")
-    done = load_embeddings(out_dir).select("image_id", "sha256")
+    done = pl.concat(
+        [load_embeddings(out_dir).select("image_id", "sha256"), failed.select("image_id", "sha256")]
+    )
     todo = ok.join(done, on=["image_id", "sha256"], how="anti")
     summary = Summary()
     if todo.is_empty():
         return summary
 
-    by_tar: dict[Path, list[tuple[str, int]]] = defaultdict(list)
     sha_of = dict(todo.select("image_id", "sha256").rows())
-    for image_id, shard in todo.select("image_id", "shard_path").sort("shard_path").iter_rows():
-        tar, key = split_shard_path(shard)
-        by_tar[data_dir / tar].append((key, image_id))
-    log.info("Embedding %d images from %d shards with %s", todo.height, len(by_tar), model)
-
+    shards = group_by_shard(todo, data_dir)
+    log.info("Embedding %d images from %d shards with %s", todo.height, len(shards), model)
     context = multiprocessing.get_context("spawn")
     with context.Pool(workers or max(1, (os.cpu_count() or 2) // 2)) as pool:
-        for tar, items in by_tar.items():
+        for tar, wanted in shards.items():
+            items = sorted(wanted.items())
             jobs = [
                 (tar, items[i : i + CHUNK], embedder.preprocessor)
                 for i in range(0, len(items), CHUNK)
             ]
-            ids: list[int] = []
-            vectors: list[np.ndarray] = []
             started = time.monotonic()
-            for batch_ids, batch_vectors, failed in _batches(
-                pool.imap(_preprocess_chunk, jobs), batch_size, embedder
-            ):
-                ids.extend(batch_ids)
-                vectors.extend(batch_vectors)
-                summary.failed += failed
+            ids, vectors, errors = _embed_shard(pool.imap(_prepare_chunk, jobs), embedder)
             summary.seconds += time.monotonic() - started
             if ids:
-                _write_part(out_dir, ids, [sha_of[i] for i in ids], np.stack(vectors))
+                _write_part(out_dir, ids, [sha_of[i] for i in ids], vectors)
                 summary.embedded += len(ids)
+            if errors:
+                rows = pl.DataFrame(
+                    [(i, sha_of[i], e) for i, e in errors], schema=FAILED_SCHEMA, orient="row"
+                )
+                failed = pl.concat(
+                    [failed.filter(~pl.col("image_id").is_in(rows["image_id"].implode())), rows]
+                )
+                atomic_write(failed_path, failed.write_parquet)
+                summary.failed += len(errors)
             log.info(
-                "%s: %d/%d images embedded (%.1f img/s)",
+                "%s: %d/%d embedded, %d failed (%.1f img/s)",
                 tar.name,
                 summary.embedded,
                 todo.height,
+                summary.failed,
                 summary.images_per_s,
             )
     meta = {"model": model, "dim": embedder.dim, "updated_at": datetime.now(UTC).isoformat()}
@@ -153,26 +164,36 @@ def run_embedding(
     return summary
 
 
-def _batches(
-    chunks: Iterator[list[tuple[int, np.ndarray | None]]], batch_size: int, embedder: Embedder
-) -> Iterator[tuple[list[int], list[np.ndarray], int]]:
-    """Group preprocessed images into GPU batches; yields (ids, vectors, failed_count)."""
+def _embed_shard(
+    chunks: Iterator[list[Prepared]], embedder: Embedder
+) -> tuple[list[int], np.ndarray, list[tuple[int, str]]]:
+    """Normalize and embed one shard's prepared images in batches of embedder.batch_size."""
+    ids: list[int] = []
+    vectors: list[np.ndarray] = []
+    errors: list[tuple[int, str]] = []
     pending_ids: list[int] = []
     pending: list[np.ndarray] = []
-    failed = 0
+
+    def flush() -> None:
+        if pending:
+            batch = embedder.preprocessor.normalize(np.stack(pending))
+            vectors.append(embedder.run_pixels(batch))
+            ids.extend(pending_ids)
+            pending_ids.clear()
+            pending.clear()
+
     for chunk in chunks:
-        for image_id, pixels in chunk:
-            if pixels is None:
-                failed += 1
+        for image_id, image, error in chunk:
+            if image is None:
+                errors.append((image_id, error or "unknown error"))
                 continue
             pending_ids.append(image_id)
-            pending.append(pixels)
-            if len(pending) == batch_size:
-                yield pending_ids, list(embedder.run_pixels(np.stack(pending))), failed
-                pending_ids, pending, failed = [], [], 0
-    if pending or failed:
-        vectors = list(embedder.run_pixels(np.stack(pending))) if pending else []
-        yield pending_ids, vectors, failed
+            pending.append(image)
+            if len(pending) == embedder.batch_size:
+                flush()
+    flush()
+    stacked = np.concatenate(vectors) if vectors else np.zeros((0, embedder.dim), np.float32)
+    return ids, stacked, errors
 
 
 def _write_part(out_dir: Path, ids: list[int], shas: list[str], vectors: np.ndarray) -> None:
@@ -215,7 +236,7 @@ def bench(
                 embedder.forward_images(batch)
             per_s: float | None = size * repeats / (time.monotonic() - started)
         except Exception as exc:
-            if "Failed to allocate" not in str(exc):
+            if not is_out_of_memory(exc):
                 raise
             per_s = None  # does not fit in GPU memory
         rows.append(
@@ -246,9 +267,7 @@ def main() -> None:
     batch_size = getattr(args, "batch_size", DEFAULT_BATCH_SIZE)
     embedder = Embedder.load(resolve_model(model, config.models_dir()), batch_size=batch_size)
     if args.command == "run":
-        summary = run_embedding(
-            data_dir, embedder, model, batch_size=args.batch_size, workers=args.workers
-        )
+        summary = run_embedding(data_dir, embedder, model, workers=args.workers)
         log.info(
             "Embedded %d images (%d failed) in %.0fs, %.1f img/s",
             summary.embedded,
@@ -256,24 +275,20 @@ def main() -> None:
             summary.seconds,
             summary.images_per_s,
         )
-    else:
-        ok = pl.read_parquet(assets_path(data_dir)).filter(pl.col("download_status") == "ok")
-        sample = ok.sort("image_id").head(args.images)
-        images: list[bytes] = []
-        by_tar: dict[Path, dict[str, int]] = defaultdict(dict)
-        for image_id, shard in sample.select("image_id", "shard_path").iter_rows():
-            tar, key = split_shard_path(shard)
-            by_tar[data_dir / tar][key] = image_id
-        for tar, wanted in by_tar.items():
-            images.extend(b for _, b in iter_shard_images(tar, wanted))
-        rows = bench(embedder, images, args.batch_sizes)
-        out = embedding_path(data_dir, model) / "bench.json"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_text(
-            out, json.dumps({"model": model, "dim": embedder.dim, "rows": rows}, indent=2)
-        )
-        with pl.Config(tbl_rows=-1, float_precision=1):
-            log.info("%s (dim %d)\n%s", model, embedder.dim, pl.DataFrame(rows))
+        return
+    ok = pl.read_parquet(assets_path(data_dir)).filter(pl.col("download_status") == "ok")
+    images = [
+        image
+        for tar, wanted in group_by_shard(ok.sort("image_id").head(args.images), data_dir).items()
+        for _, image in iter_shard_images(tar, wanted)
+    ]
+    rows = bench(embedder, images, args.batch_sizes)
+    out = embedding_path(data_dir, model) / "bench.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"model": model, "dim": embedder.dim, "rows": rows}
+    atomic_write_text(out, json.dumps(payload, indent=2))
+    with pl.Config(tbl_rows=-1, float_precision=1):
+        log.info("%s (dim %d)\n%s", model, embedder.dim, pl.DataFrame(rows))
 
 
 if __name__ == "__main__":

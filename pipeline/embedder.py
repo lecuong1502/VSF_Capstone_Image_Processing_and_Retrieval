@@ -15,6 +15,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+from collections import defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,7 +24,7 @@ from typing import Any
 import numpy as np
 import onnxruntime as ort
 from PIL import Image
-from tokenizers import Tokenizer
+from tokenizers import Tokenizer, normalizers
 
 log = logging.getLogger(__name__)
 
@@ -64,11 +65,17 @@ def resolve_model(repo: str, models_dir: Path) -> Path:
     return local
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class Preprocessor:
+    """Image preprocessing from a model's preprocessor_config.json.
+
+    `prepare` (decode, RGB, resize, crop → uint8 HWC) runs in worker processes; `normalize`
+    (rescale, mean/std → float32 NCHW) runs on whole batches, so workers ship 4× less data.
+    """
+
     height: int
     width: int
-    shortest_then_crop: bool  # Jina: resize shortest side, center crop; HF: resize to (h, w)
+    resize_short: int | None  # resize the shortest side to this, then center crop; else squash
     resample: int
     mean: np.ndarray
     std: np.ndarray
@@ -76,24 +83,23 @@ class Preprocessor:
     @classmethod
     def from_config(cls, cfg: dict[str, Any]) -> Preprocessor:
         size = cfg.get("size", 224)
-        if isinstance(size, dict):
-            if "shortest_edge" in size:
-                height = width = int(size["shortest_edge"])
-                crop = True
-            else:
-                height, width = int(size["height"]), int(size["width"])
-                crop = False
-        else:
+        resize_short: int | None
+        if isinstance(size, dict) and "shortest_edge" in size:
+            resize_short = int(size["shortest_edge"])
+            height = width = resize_short
+        elif isinstance(size, dict):
+            height, width = int(size["height"]), int(size["width"])
+            resize_short = None
+        else:  # Jina: an int plus resize_mode="shortest"
             height = width = int(size)
-            crop = cfg.get("resize_mode", "shortest") == "shortest"
-        if "crop_size" in cfg and cfg.get("do_center_crop"):
-            crop_size = cfg["crop_size"]
+            resize_short = height if cfg.get("resize_mode", "shortest") == "shortest" else None
+        if cfg.get("do_center_crop") and "crop_size" in cfg:
+            crop = cfg["crop_size"]
             height, width = (
-                (int(crop_size["height"]), int(crop_size["width"]))
-                if isinstance(crop_size, dict)
-                else (int(crop_size), int(crop_size))
+                (int(crop["height"]), int(crop["width"]))
+                if isinstance(crop, dict)
+                else (int(crop), int(crop))
             )
-            crop = True
         resample = cfg.get("resample", cfg.get("interpolation", "bicubic"))
         if isinstance(resample, str):
             resample = RESAMPLE.get(resample, 3)
@@ -102,21 +108,20 @@ class Preprocessor:
         return cls(
             height,
             width,
-            crop,
+            resize_short,
             int(resample),
-            np.asarray(mean, dtype=np.float32).reshape(3, 1, 1),
-            np.asarray(std, dtype=np.float32).reshape(3, 1, 1),
+            np.asarray(mean, dtype=np.float32).reshape(1, 3, 1, 1),
+            np.asarray(std, dtype=np.float32).reshape(1, 3, 1, 1),
         )
 
-    def __call__(self, image_bytes: bytes) -> np.ndarray:
-        """Encoded image → normalized float32 array (3, height, width)."""
+    def prepare(self, image_bytes: bytes) -> np.ndarray:
+        """Encoded image → uint8 (height, width, 3), resized and cropped like the reference."""
         with Image.open(io.BytesIO(image_bytes)) as image:
+            # JPEG DCT downscale only while it stays ≥ 2× the target, so quality is unaffected.
             image.draft("RGB", (self.width * 2, self.height * 2))
-            rgba = image.convert("RGBA")
-        rgb = Image.new("RGB", rgba.size, (255, 255, 255))
-        rgb.paste(rgba, mask=rgba.getchannel("A"))
-        if self.shortest_then_crop:
-            scale = max(self.width / rgb.width, self.height / rgb.height)
+            rgb = image.convert("RGB")
+        if self.resize_short is not None:
+            scale = self.resize_short / min(rgb.width, rgb.height)
             size = (
                 max(self.width, round(rgb.width * scale)),
                 max(self.height, round(rgb.height * scale)),
@@ -126,9 +131,18 @@ class Preprocessor:
             rgb = rgb.crop((left, top, left + self.width, top + self.height))
         else:
             rgb = rgb.resize((self.width, self.height), resample=self.resample)
-        pixels = np.asarray(rgb, dtype=np.float32).transpose(2, 0, 1) / 255.0
+        return np.asarray(rgb, dtype=np.uint8)
+
+    def normalize(self, prepared: np.ndarray) -> np.ndarray:
+        """uint8 (n, H, W, 3) → normalized float32 (n, 3, H, W)."""
+        pixels = prepared.astype(np.float32).transpose(0, 3, 1, 2) / 255.0
         normalized: np.ndarray = (pixels - self.mean) / self.std
         return normalized
+
+    def __call__(self, image_bytes: bytes) -> np.ndarray:
+        """Encoded image → normalized float32 (3, height, width)."""
+        single: np.ndarray = self.normalize(self.prepare(image_bytes)[None])[0]
+        return single
 
 
 def _normalize(x: np.ndarray) -> np.ndarray:
@@ -144,6 +158,11 @@ def _pick_output(session: ort.InferenceSession, names: Sequence[str]) -> str:
         if name in available:
             return name
     raise ValueError(f"none of {names} in model outputs {available}")
+
+
+def is_out_of_memory(exc: BaseException) -> bool:
+    """onnxruntime reports GPU allocation failures as a generic Fail with this message."""
+    return "Failed to allocate" in str(exc)
 
 
 def default_providers() -> list[Any]:
@@ -223,15 +242,25 @@ class Embedder:
     def embed_images(self, images: Sequence[bytes]) -> np.ndarray:
         return self.run_pixels(np.stack([self.preprocessor(b) for b in images]))
 
+    def tokenize(self, texts: Sequence[str]) -> list[list[int]]:
+        return [e.ids for e in self.tokenizer.encode_batch(list(texts))]
+
     def embed_texts(self, texts: Sequence[str]) -> np.ndarray:
-        """Texts → L2-normalized (n, dim). With a combined model this also runs the vision tower
-        on blank images, so it costs about as much as embedding images."""
-        ids = np.asarray([e.ids for e in self.tokenizer.encode_batch(list(texts))], np.int64)
-        return self._batched(ids, self._run_text_batch)
+        """Texts → L2-normalized (n, dim). Texts are batched only with texts of the same token
+        length, so no padding is added beyond what the model's tokenizer itself prescribes (the
+        combined ONNX graph takes no attention mask). With a combined model the vision tower also
+        runs on blank images, so this costs about as much as embedding images."""
+        ids = self.tokenize(texts)
+        by_length: dict[int, list[int]] = defaultdict(list)
+        for i, row in enumerate(ids):
+            by_length[len(row)].append(i)
+        out = np.zeros((len(ids), self.dim), np.float32)
+        for rows in by_length.values():
+            batch = np.asarray([ids[i] for i in rows], np.int64)
+            out[rows] = self._batched(batch, self._run_text_batch)
+        return out
 
     def _batched(self, inputs: np.ndarray, run: Callable[[np.ndarray], np.ndarray]) -> np.ndarray:
-        if len(inputs) == 0:
-            return np.zeros((0, getattr(self, "dim", 0)), np.float32)
         parts = [
             self._split_on_oom(inputs[i : i + self.batch_size], run)
             for i in range(0, len(inputs), self.batch_size)
@@ -245,7 +274,7 @@ class Embedder:
         try:
             return run(batch)
         except Exception as exc:  # onnxruntime raises its own Fail type on allocation errors
-            if "Failed to allocate" not in str(exc) or len(batch) == 1:
+            if not is_out_of_memory(exc) or len(batch) == 1:
                 raise
             log.warning("GPU out of memory at batch %d, splitting", len(batch))
             half = len(batch) // 2
@@ -275,22 +304,18 @@ class Embedder:
 
 
 def _load_tokenizer(model_dir: Path) -> Tokenizer:
+    """tokenizer.json as shipped (SigLIP2's already pads to a fixed 64 tokens), plus lowercasing
+    when tokenizer_config.json asks for it and a truncation limit if none is set."""
     tokenizer = Tokenizer.from_file(str(model_dir / "tokenizer.json"))
-    special = model_dir / "special_tokens_map.json"
-    pad_token = None
-    if special.exists():
-        value = json.loads(special.read_text()).get("pad_token")
-        pad_token = value.get("content") if isinstance(value, dict) else value
-    pad_id = tokenizer.token_to_id(pad_token) if pad_token else None
-    pad_id = pad_id if pad_id is not None else 0
-    config = model_dir / "config.json"
-    fixed = None
-    if config.exists():
-        fixed = json.loads(config.read_text()).get("text_config", {}).get("max_position_embeddings")
-    if fixed:  # SigLIP-style text towers expect exactly this many tokens
-        tokenizer.enable_truncation(int(fixed))
-        tokenizer.enable_padding(length=int(fixed), pad_id=pad_id, pad_token=pad_token or "")
-    else:
-        tokenizer.enable_truncation(DEFAULT_TEXT_LENGTH)
-        tokenizer.enable_padding(pad_id=pad_id, pad_token=pad_token or "")
+    config_path = model_dir / "tokenizer_config.json"
+    tok_config = json.loads(config_path.read_text()) if config_path.exists() else {}
+    if tok_config.get("do_lower_case"):
+        lowercase = normalizers.Lowercase()
+        existing = tokenizer.normalizer
+        tokenizer.normalizer = (
+            normalizers.Sequence([lowercase, existing]) if existing is not None else lowercase
+        )
+    if tokenizer.truncation is None:
+        limit = tok_config.get("model_max_length", DEFAULT_TEXT_LENGTH)
+        tokenizer.enable_truncation(int(min(limit, DEFAULT_TEXT_LENGTH)))
     return tokenizer
