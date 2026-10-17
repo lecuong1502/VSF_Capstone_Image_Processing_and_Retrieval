@@ -40,10 +40,12 @@ class FakeTransport:
         return [self._answer(r) for r in requests]
 
 
-def make_client(tmp_path: Path, transport: FakeTransport, budget_usd: float = 5.0) -> GeminiClient:
+def make_client(
+    tmp_path: Path, transport: FakeTransport, budget_usd: float = 5.0, model: str = "gemini-test"
+) -> GeminiClient:
     return GeminiClient(
         transport=transport,
-        model="gemini-test",
+        model=model,
         pricing=PRICING,
         budget_usd=budget_usd,
         cache_dir=tmp_path / "cache",
@@ -91,15 +93,9 @@ def test_cache_key_covers_image_bytes_and_model(tmp_path: Path) -> None:
 
     client.generate("s", GeminiRequest(prompt="p", images=(Image(b"a", "image/png"),)))
     client.generate("s", GeminiRequest(prompt="p", images=(Image(b"b", "image/png"),)))
-    other_model = GeminiClient(
-        transport=transport,
-        model="gemini-other",
-        pricing=PRICING,
-        budget_usd=5.0,
-        cache_dir=tmp_path / "cache",
-        ledger=client.ledger,
+    make_client(tmp_path, transport, model="gemini-other").generate(
+        "s", GeminiRequest(prompt="p", images=(Image(b"a", "image/png"),))
     )
-    other_model.generate("s", GeminiRequest(prompt="p", images=(Image(b"a", "image/png"),)))
 
     assert len(transport.online_calls) == 3
 
@@ -175,3 +171,55 @@ def test_batch_budget_is_checked_for_the_whole_job(tmp_path: Path) -> None:
         client.batch("captions", [GeminiRequest(prompt=str(i)) for i in range(100)])
 
     assert transport.batches == []
+
+
+class FailingSecondBatchTransport(FakeTransport):
+    def run_batch(self, model: str, requests: Sequence[GeminiRequest]) -> list[RawResponse]:
+        if self.batches:
+            raise ConnectionError("network down while polling")
+        return super().run_batch(model, requests)
+
+
+def test_each_batch_chunk_is_logged_and_cached_before_the_next_runs(tmp_path: Path) -> None:
+    transport = FailingSecondBatchTransport()
+    client = make_client(tmp_path, transport)
+    client.max_batch_bytes = 10  # forces one request per chunk
+    requests = [GeminiRequest(prompt=p) for p in ("chunk-1 req", "chunk-2 req")]
+
+    with pytest.raises(ConnectionError):
+        client.batch("captions", requests)
+
+    # The first, already paid chunk is in the ledger and the cache.
+    assert client.ledger.spent_usd() == pytest.approx(ONLINE_COST * 0.5)
+    assert client.generate("captions", requests[0]).cached
+
+
+def test_output_not_matching_schema_is_an_error_and_not_cached(tmp_path: Path) -> None:
+    transport = FakeTransport(text='{"label": ')  # truncated JSON
+    client = make_client(tmp_path, transport)
+    request = GeminiRequest(prompt="classify", schema=Label)
+
+    result = client.generate("labels", request)
+    client.generate("labels", request)
+
+    assert not result.ok and "schema" in (result.error or "")
+    assert result.usd > 0  # still billed and logged
+    assert len(transport.online_calls) == 2
+
+
+def test_cache_key_covers_generation_settings(tmp_path: Path) -> None:
+    transport = FakeTransport()
+    client = make_client(tmp_path, transport)
+
+    client.generate("s", GeminiRequest(prompt="p"))
+    client.generate("s", GeminiRequest(prompt="p", temperature=0.7))
+    client.generate("s", GeminiRequest(prompt="p", thinking_level="LOW"))
+
+    assert len(transport.online_calls) == 3
+
+
+def test_default_generation_settings_follow_spec() -> None:
+    request = GeminiRequest(prompt="p")
+
+    assert request.temperature == 0.0
+    assert request.thinking_level == "MINIMAL"

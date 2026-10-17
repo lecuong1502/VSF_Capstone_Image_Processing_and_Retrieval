@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import fcntl
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import IO, TYPE_CHECKING
 
 import polars as pl
+
+from pipeline.gemini.files import atomic_write
 
 if TYPE_CHECKING:
     from pipeline.gemini.client import GeminiResult
@@ -30,6 +34,25 @@ SCHEMA = pl.Schema(
 class UsageLedger:
     def __init__(self, path: Path) -> None:
         self.path = path
+        self._lock_depth = 0
+        self._lock_file: IO[bytes] | None = None
+
+    @contextmanager
+    def lock(self) -> Iterator[None]:
+        """Exclusive, re-entrant cross-process lock on the ledger (flock on a sidecar file)."""
+        if self._lock_depth == 0:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._lock_file = self.path.with_name(f".{self.path.name}.lock").open("ab")
+            fcntl.flock(self._lock_file, fcntl.LOCK_EX)
+        self._lock_depth += 1
+        try:
+            yield
+        finally:
+            self._lock_depth -= 1
+            if self._lock_depth == 0 and self._lock_file is not None:
+                fcntl.flock(self._lock_file, fcntl.LOCK_UN)
+                self._lock_file.close()
+                self._lock_file = None
 
     def _read(self) -> pl.DataFrame:
         if not self.path.exists():
@@ -55,10 +78,9 @@ class UsageLedger:
             },
             schema=SCHEMA,
         )
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".tmp")
-        pl.concat([self._read(), rows]).write_parquet(tmp)
-        tmp.replace(self.path)
+        with self.lock():
+            combined = pl.concat([self._read(), rows])
+            atomic_write(self.path, combined.write_parquet)
 
     def spent_usd(self) -> float:
         return float(self._read()["usd"].sum())

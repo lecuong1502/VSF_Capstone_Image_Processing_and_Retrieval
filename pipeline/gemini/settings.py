@@ -10,6 +10,10 @@ import dotenv
 
 from pipeline.gemini.client import Pricing
 
+# Relative DATA_DIR values resolve against the repo root, not the cwd, so every process shares
+# one cache and one ledger (and therefore one budget).
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
 
 @dataclass(frozen=True)
 class GeminiSettings:
@@ -17,16 +21,15 @@ class GeminiSettings:
     model: str
     budget_usd: float
     pricing: Pricing
-    thinking_level: str
     cache_dir: Path
     usage_log: Path
 
     @classmethod
     def from_env(cls, *, load_dotenv: bool = True) -> GeminiSettings:
         if load_dotenv:
-            dotenv.load_dotenv(dotenv.find_dotenv(usecwd=True))
+            dotenv.load_dotenv(REPO_ROOT / ".env")
         env = os.environ.get
-        data_dir = Path(env("DATA_DIR", "data")).expanduser()
+        data_dir = REPO_ROOT / Path(env("DATA_DIR", "data")).expanduser()
         return cls(
             api_key=env("GEMINI_API_KEY", ""),
             model=env("GEMINI_MODEL", "gemini-3.5-flash-lite"),
@@ -36,7 +39,6 @@ class GeminiSettings:
                 output_per_m=float(env("GEMINI_PRICE_OUTPUT_PER_M", "2.50")),
                 batch_discount=float(env("GEMINI_BATCH_DISCOUNT", "0.5")),
             ),
-            thinking_level=env("GEMINI_THINKING_LEVEL", "MINIMAL"),
             cache_dir=data_dir / "cache" / "gemini",
             usage_log=data_dir / "gemini_usage.parquet",
         )
