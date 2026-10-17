@@ -27,3 +27,13 @@ def data_dir() -> Path:
 
 def raw_data_dir() -> Path:
     return env_path("RAW_DATA_DIR", "~/Desktop/vinhomes-crawler/detect_human")
+
+
+def models_dir() -> Path:
+    """Downloaded model weights (git-ignored)."""
+    return env_path("MODELS_DIR", "models")
+
+
+def embed_model() -> str:
+    """Hugging Face repo of the image/text embedding model (FP16 ONNX export)."""
+    return os.environ.get("EMBED_MODEL", "jinaai/jina-clip-v2")
