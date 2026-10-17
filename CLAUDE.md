@@ -29,7 +29,9 @@ tests/               tests for pipeline/ and eval/
 bench/ loadtest/k6/  benchmarks, k6 scripts
 deploy/              docker-compose, prometheus
 docs/                architecture, performance, slides
-data/sample/         the only committed data – planned in #7: ~50 landmark-only rows, no annotator columns
+data/sample/         the only committed data: 61 raw-format CSV rows = 41 (image, entity) pairs (landmarks only, no annotator columns),
+                     built by `make sample` with neutral file names (entity_new_* / supplement_* / assignment_*,
+                     same precedence as the raw names); tests/CI run `pipeline.ingest` on it
 ```
 
 ## Commands

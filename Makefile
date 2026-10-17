@@ -10,7 +10,7 @@ GATEWAY := services/gateway
 WEB := apps/web
 
 .PHONY: help setup sync requirements lint lint-py lint-go lint-web fmt test test-py test-go build-web \
-	gemini-cost gemini-smoke ingest pipeline restore eval loadtest
+	gemini-cost gemini-smoke ingest sample pipeline restore eval loadtest
 
 help: ## List available targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-14s %s\n", $$1, $$2}'
@@ -73,6 +73,9 @@ gemini-smoke: ## One real Gemini call (~$0.0001) to check the key, logging and p
 
 ingest: ## Merge the verified CSVs from RAW_DATA_DIR into $DATA_DIR/ingest (Parquet + DuckDB)
 	$(UV) run python -m pipeline.ingest
+
+sample: ## Regenerate the committed data/sample/ fixture from RAW_DATA_DIR (landmarks only, no annotators)
+	$(UV) run python -m pipeline.sample
 
 pipeline: ingest ## Run the offline pipeline (ingest → … → index)
 	@echo "Steps after ingest are not implemented yet – see milestones M1/M2."
