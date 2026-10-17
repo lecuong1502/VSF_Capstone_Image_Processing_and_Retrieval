@@ -269,3 +269,11 @@ def test_transparent_images_get_a_white_thumbnail_background(tmp_path: Path) -> 
 
     with Image.open(out) as thumb:
         assert thumb.convert("RGB").getpixel((10, 10)) == (255, 255, 255)
+
+
+def test_download_holds_the_data_lock(tmp_path: Path) -> None:
+    from pipeline.files import LockedError, exclusive_lock
+
+    (tmp_path / "data" / "download").mkdir(parents=True)
+    with exclusive_lock(tmp_path / "data" / "download" / ".lock"), pytest.raises(LockedError):
+        run(tmp_path, FakeFetcher())
