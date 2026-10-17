@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: Python (ruff, mypy, pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            uv.lock
+            services/search/uv.lock
+      - name: Install dependencies
+        run: |
+          uv sync --locked
+          uv sync --locked --directory services/search
+      - run: make lint-py
+      - run: make test-py
+
+  go:
+    name: Go (gofmt, vet, test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: services/gateway/go.mod
+          cache-dependency-path: services/gateway/go.mod
+      - run: make lint-go
+      - run: make test-go
+
+  web:
+    name: Web (eslint, prettier, build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+        working-directory: apps/web
+      - run: make lint-web
+      - run: make build-web

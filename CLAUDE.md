@@ -35,16 +35,19 @@ data/sample/         the only committed data – planned in #7: ~50 landmark-onl
 ## Commands
 
 ```bash
-make setup         # create .env, uv sync both projects, install pre-commit hooks
-make lint          # uv.lock + requirements.txt in sync, ruff check + format --check (whole repo), mypy (per project)
-make test          # pytest (per project)
-make fmt           # ruff format + ruff check --fix
+make setup         # create .env, uv sync both projects, go mod download, npm ci, install pre-commit hooks
+make lint          # lint-py (lockfiles/requirements in sync, ruff, mypy) + lint-go (gofmt, go vet) + lint-web (eslint, prettier)
+make test          # test-py (pytest per project) + test-go
+make build-web     # tsc + vite build
+make fmt           # ruff, gofmt, prettier
 make requirements  # regenerate requirements.txt files from uv.lock (lint fails if stale)
 ```
 
+Toolchains: Python 3.12 + uv, Go (version from `services/gateway/go.mod`), Node 22. CI (`.github/workflows/ci.yml`) runs `lint-*`, `test-*` and `build-web` in three jobs and is required to merge into `main`.
+
 Python 3.12, dependencies managed only with `uv` (`uv add <pkg>`, never `pip install`). Run tools through `uv run`. Pre-commit hooks (ruff, mypy, gofmt/go vet, eslint/prettier, and a hook that rejects `data/` outside `data/sample/`, `models/`, `reports/`, weights (`*.onnx`, `*.pt`, `*.safetensors`, …), data files (`*.parquet`, `*.duckdb`, `*.sqlite`) and `.env*`) are defined in `.pre-commit-config.yaml` – never bypass them with `--no-verify`. `requirements.txt` files are generated from `uv.lock` for pip users – never edit them by hand.
 
-To implement an issue, follow the repo skill `.claude/skills/work-on-issue/SKILL.md`. Go and Node toolchains are added to `make lint/test` by the tickets that create the gateway and web app.
+To implement an issue, follow the repo skill `.claude/skills/work-on-issue/SKILL.md`.
 
 ## Conventions
 

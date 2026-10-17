@@ -52,7 +52,7 @@ git clone https://github.com/lecuong1502/VSF_Capstone_Image_Processing_and_Retri
 cd VSF_Capstone_Image_Processing_and_Retrieval
 cp .env.example .env          # set RAW_DATA_DIR, GEMINI_API_KEY, ... (never commit .env)
 make setup                    # create .env, install dependencies + pre-commit hooks (ONNX weights arrive with #11)
-make lint test                # must pass before opening a PR
+make lint test build-web      # must pass before opening a PR (same checks as CI)
 ```
 
 Run the stack locally:
