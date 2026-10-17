@@ -30,10 +30,17 @@ class LinearHead:
     intercept: float
     iso_x: np.ndarray  # isotonic calibration knots: raw sigmoid score -> probability
     iso_y: np.ndarray
+    # On the raw score, not the calibrated probability: isotonic output is a step function, and
+    # a threshold inside a tie block would move the whole block (it is monotone, so the order is
+    # the same).
     thresholds: Thresholds
 
     def raw(self, x: np.ndarray) -> np.ndarray:
         return _sigmoid(x @ self.coef + self.intercept)
+
+    def zone(self, x: np.ndarray) -> np.ndarray:
+        """0 pass, 1 escalate, 2 reject."""
+        return self.thresholds.zone(self.raw(x))
 
     def predict_proba(self, x: np.ndarray) -> np.ndarray:
         return np.asarray(np.interp(self.raw(x), self.iso_x, self.iso_y))
@@ -122,8 +129,7 @@ def fit_linear_head(
     raw = _sigmoid(x_cal @ coef + intercept)
     iso = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds="clip").fit(raw, y_cal)
     iso_x, iso_y = iso.X_thresholds_, iso.y_thresholds_
-    p_cal = np.interp(raw, iso_x, iso_y)
-    thresholds = pick_thresholds(p_cal, y_cal, precision=precision, recall=recall)
+    thresholds = pick_thresholds(raw, y_cal, precision=precision, recall=recall)
     return LinearHead(name, coef, intercept, iso_x, iso_y, thresholds)
 
 

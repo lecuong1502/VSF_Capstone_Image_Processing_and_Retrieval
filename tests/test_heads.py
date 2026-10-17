@@ -354,6 +354,8 @@ def test_train_heads_end_to_end(data_dir: Path) -> None:
     assert wm["recall_kept_by_low"] >= wm["reject"]["recall"][0]
     shares = [h["escalation_share"] for h in heads.values() if "escalation_share" in h]
     assert sum(shares) <= report["escalation_budget"] + 1e-9
+    # thresholds on continuous scores: the allocated shares are really escalated
+    assert report["escalation_rate"] >= max(shares) - 0.005
     assert sum(wm["confusion"].values()) == wm["n_test"]
     assert all(n > 0 for _, _, n in wm["reliability"])
     assert report["escalation_rate"] <= report["escalation_budget"] + 0.01
@@ -370,14 +372,21 @@ def test_train_heads_end_to_end(data_dir: Path) -> None:
     assert {"p_watermark", "p_text", "p_political", "p_nsfw", "p_violence", "quality"} <= set(
         scores.columns
     )
+    assert scores["zone_watermark"].is_in([0, 1, 2]).all()
     assert scores["model_version"].unique().to_list() == [version]
     flags = pl.read_parquet(data_dir / "dedup" / "representative_flags.parquet")
     assert flags.columns == ["image_id", "has_brand_or_phone", "watermark_head"]
     assert flags["has_brand_or_phone"].mean() == pytest.approx(0.3, abs=0.1)
     pairs = pl.read_parquet(scores_path(data_dir).with_name("relevance_scores.parquet"))
-    assert {"image_id", "entity_id", "p_relevant", "s_text", "s_proto", "neighbor_rank"} <= set(
-        pairs.columns
-    )
+    assert {
+        "image_id",
+        "entity_id",
+        "p_relevant",
+        "zone",
+        "s_text",
+        "s_proto",
+        "neighbor_rank",
+    } <= set(pairs.columns)
 
 
 def test_representative_flags_keep_other_sources(data_dir: Path) -> None:

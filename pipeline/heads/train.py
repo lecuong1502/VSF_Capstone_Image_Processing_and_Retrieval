@@ -64,7 +64,7 @@ log = logging.getLogger(__name__)
 
 TextEncoder = Callable[[list[str]], np.ndarray]
 
-CODE_VERSION = "3"  # bump when training changes, so model_version changes too
+CODE_VERSION = "4"  # bump when training changes, so model_version changes too
 PRECISION = 0.95  # precision(reject) at the auto-reject threshold (spec §4.2)
 RECALL = 0.98  # recall(reject) target (spec §4.2: 0.98–0.99), reached only within the budget
 # Share of all images the heads may escalate together (#14: ≤ 5%). Pass thresholds are not set
@@ -177,6 +177,7 @@ def _binary_report(
     head: LinearHead, x_test: np.ndarray, y_test: np.ndarray, n_boot: int
 ) -> dict[str, Any]:
     p = head.predict_proba(x_test)
+    raw = head.raw(x_test)
     pred = p >= 0.5
     has_both = 0 < y_test.sum() < y_test.size
     t = head.thresholds
@@ -184,8 +185,10 @@ def _binary_report(
         "n_test": int(y_test.size),
         "positives_test": int(y_test.sum()),
         "test": bootstrap_prf(y_test, pred, n_boot=n_boot),
-        "reject": bootstrap_prf(y_test, p >= t.high, n_boot=n_boot),
-        "recall_kept_by_low": round(float(np.mean(p[y_test] > t.low)), 4) if y_test.any() else None,
+        "reject": bootstrap_prf(y_test, raw >= t.high, n_boot=n_boot),
+        "recall_kept_by_low": round(float(np.mean(raw[y_test] > t.low)), 4)
+        if y_test.any()
+        else None,
         "confusion": {
             "tp": int(np.sum(pred & y_test)),
             "fp": int(np.sum(pred & ~y_test)),
@@ -228,7 +231,7 @@ class Trained:
     report: dict[str, Any]
     x_test: np.ndarray | None = None  # None: no labels to evaluate on
     y_test: np.ndarray | None = None
-    cal_positive_p: np.ndarray = field(default_factory=lambda: np.zeros(0))
+    cal_positive_score: np.ndarray = field(default_factory=lambda: np.zeros(0))  # raw scores
 
 
 def _train_flags(data_dir: Path, corpus: Corpus, encode_text: TextEncoder) -> dict[str, Trained]:
@@ -253,7 +256,7 @@ def _train_flags(data_dir: Path, corpus: Corpus, encode_text: TextEncoder) -> di
             "n_train": int(train.sum()),
             "n_cal": int(cal.sum()),
         }
-        trained[name] = Trained(head, report, x[test], y[test], head.predict_proba(x[cal])[y[cal]])
+        trained[name] = Trained(head, report, x[test], y[test], head.raw(x[cal])[y[cal]])
     return trained
 
 
@@ -371,6 +374,7 @@ def _train_relevance(
         "relevance", x[train], y[train], x[cal], y[cal], precision=PRECISION, recall=RECALL
     )
     p_reject = head.predict_proba(x)
+    raw_reject = head.raw(x)
 
     test = features.with_row_index("row").join(human, on=["image_id", "entity_id"])
     t_rows = test["row"].to_numpy()
@@ -396,9 +400,10 @@ def _train_relevance(
         "neighbor_rank",
         "suggested_entity_id",
         p_relevant=pl.Series(1 - p_reject),
+        reject_score=pl.Series(raw_reject),
     )
-    cal_positive_p = p_reject[cal & y]
-    trained = Trained(head, report, x[t_rows], (test["human"] == "no").to_numpy(), cal_positive_p)
+    cal_positive = raw_reject[cal & y]
+    trained = Trained(head, report, x[t_rows], (test["human"] == "no").to_numpy(), cal_positive)
     return trained, scores
 
 
@@ -420,20 +425,18 @@ def _write_representative_flags(data_dir: Path, image_scores: pl.DataFrame) -> N
     atomic_write(path, flags.write_parquet)
 
 
-def _escalation_keys(head: LinearHead, p: np.ndarray) -> np.ndarray:
+def _escalation_keys(head: LinearHead, raw: np.ndarray) -> np.ndarray:
     """An image escalates when its key > low; images the head auto-rejects never escalate."""
-    return np.where(p < head.thresholds.high, p, -np.inf)
+    return np.where(raw < head.thresholds.high, raw, -np.inf)
 
 
 def _relevance_keys(corpus: Corpus, head: LinearHead, pair_scores: pl.DataFrame) -> np.ndarray:
-    """Per image, the highest p_reject among its pairs that are not auto-rejected: the image
-    escalates when any of its pairs falls in the band."""
-    keyed = pair_scores.select("image_id", p_reject=1 - pl.col("p_relevant")).filter(
-        pl.col("p_reject") < head.thresholds.high
-    )
-    best = keyed.group_by("image_id").agg(pl.col("p_reject").max())
+    """Per image, the highest raw reject score among its pairs that are not auto-rejected: the
+    image escalates when any of its pairs falls in the band."""
+    keyed = pair_scores.filter(pl.col("reject_score") < head.thresholds.high)
+    best = keyed.group_by("image_id").agg(pl.col("reject_score").max())
     keys = np.full(len(corpus.image_ids), -np.inf)
-    keys[corpus.rows(best["image_id"].to_list())] = best["p_reject"].to_numpy()
+    keys[corpus.rows(best["image_id"].to_list())] = best["reject_score"].to_numpy()
     return keys
 
 
@@ -445,11 +448,11 @@ def train_heads(
     shot, shot_report = _train_shot_type(data_dir, corpus, n_boot, seed)
     trained["relevance"], pair_scores = _train_relevance(data_dir, corpus, encode_text, shot)
 
-    population = {n: trained[n].head.predict_proba(corpus.vectors) for n in FLAGS}
+    raw = {n: trained[n].head.raw(corpus.vectors) for n in FLAGS}
     curves = {
         n: BudgetCurve(
-            keys=_escalation_keys(trained[n].head, population[n]),
-            cal_positive_p=trained[n].cal_positive_p,
+            keys=_escalation_keys(trained[n].head, raw[n]),
+            cal_positive_p=trained[n].cal_positive_score,
             high=trained[n].head.thresholds.high,
             fixed_share=ZERO_SHOT_SHARE if trained[n].report["model"] == "zero-shot" else None,
         )
@@ -457,7 +460,7 @@ def train_heads(
     }
     curves["relevance"] = BudgetCurve(
         keys=_relevance_keys(corpus, trained["relevance"].head, pair_scores),
-        cal_positive_p=trained["relevance"].cal_positive_p,
+        cal_positive_p=trained["relevance"].cal_positive_score,
         high=trained["relevance"].head.thresholds.high,
     )
     allocation = allocate_escalation(
@@ -472,7 +475,7 @@ def train_heads(
         reports[name] = {
             **t.report,
             "escalation_share": a.share,
-            "recall_cal_within_budget": round(a.recall, 4) if t.cal_positive_p.size else None,
+            "recall_cal_within_budget": round(a.recall, 4) if t.cal_positive_score.size else None,
         }
         if t.x_test is not None and t.y_test is not None:
             reports[name] |= _binary_report(head, t.x_test, t.y_test, n_boot)
@@ -493,21 +496,27 @@ def train_heads(
         {
             "image_id": corpus.image_ids,
             "model_version": version,
-            **{score_column(n): population[n] for n in FLAGS},
+            **{score_column(n): heads[n].predict_proba(corpus.vectors) for n in FLAGS},
+            **{f"zone_{n}": heads[n].thresholds.zone(raw[n]) for n in FLAGS},
             "quality": corpus.quality,
             "shot_type_pred": shot.predict(corpus.vectors) if shot else None,
         }
     )
     escalated = np.zeros(len(corpus.image_ids), bool)
     for n in FLAGS:
-        escalated |= heads[n].thresholds.zone(population[n]) == 1
+        escalated |= heads[n].thresholds.zone(raw[n]) == 1
     escalated |= curves["relevance"].keys > heads["relevance"].thresholds.low
     image_scores = image_scores.with_columns(escalated=pl.Series(escalated))
 
     atomic_write(scores_path(data_dir), image_scores.write_parquet)
     atomic_write(
         scores_path(data_dir).with_name("relevance_scores.parquet"),
-        pair_scores.with_columns(model_version=pl.lit(version)).write_parquet,
+        pair_scores.with_columns(
+            zone=pl.Series(
+                heads["relevance"].thresholds.zone(pair_scores["reject_score"].to_numpy())
+            ),
+            model_version=pl.lit(version),
+        ).write_parquet,
     )
     if reports["watermark"]["truth"] == "gemini":
         _write_representative_flags(data_dir, image_scores)
