@@ -51,7 +51,7 @@ RETRYABLE = frozenset({"failed"})
 UNREACHABLE = frozenset({"dead", "ssl_error", "blocked", "not_image", "opted_out", "invalid_url"})
 STORED_SIZE = 1024  # short side of the stored image used for embeddings (spec §4.1)
 THUMB_SIZE = 384  # long side of the UI thumbnail (spec §6)
-CHUNK_SIZE = 2000  # images per img2dataset call = checkpoint granularity
+CHUNK_SIZE = 5000  # images per img2dataset call = checkpoint granularity
 _OPTED_OUT = "X-Robots-Tag"
 _DEAD = re.compile(
     r"HTTP Error (400|401|403|404|410)|Name or service not known|No address associated|"
@@ -350,6 +350,9 @@ def img2dataset_fetch(batch: pl.DataFrame, out_dir: Path) -> pl.DataFrame:
     from img2dataset import download
 
     out_dir.mkdir(parents=True, exist_ok=True)
+    processes = max(1, (os.cpu_count() or 2) // 2)
+    # img2dataset parallelizes across shards: give every process at least one shard.
+    per_shard = max(50, -(-batch.height // processes))
     url_list = out_dir.with_suffix(".input.parquet")
     batch.select("url", "image_id").write_parquet(url_list)
     download(
@@ -365,9 +368,9 @@ def img2dataset_fetch(batch: pl.DataFrame, out_dir: Path) -> pl.DataFrame:
         compute_hash="sha256",
         retries=2,
         timeout=10,
-        processes_count=max(1, (os.cpu_count() or 2) // 2),
+        processes_count=processes,
         thread_count=32,
-        number_sample_per_shard=1000,
+        number_sample_per_shard=per_shard,
         distributor="multiprocessing",
         enable_wandb=False,
         user_agent_token="vsf-capstone-research",
