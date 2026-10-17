@@ -61,14 +61,14 @@ repos:
         files: '^services/gateway/.*\.go$'
         pass_filenames: false
 
-      # TypeScript (only triggers once apps/web has a package.json and sources – #27)
+      # Web app – same file coverage as `npm run lint` / `npm run format:check` (apps/web/.prettierignore applies)
       - id: eslint
         name: eslint
         language: system
         entry: bash -c 'cd apps/web && npx --no-install eslint --fix "${@#apps/web/}"' --
-        files: '^apps/web/.*\.(ts|tsx)$'
+        files: '^apps/web/.*\.(js|jsx|ts|tsx)$'
       - id: prettier
         name: prettier
         language: system
-        entry: bash -c 'cd apps/web && npx --no-install prettier --write "${@#apps/web/}"' --
-        files: '^apps/web/.*\.(ts|tsx|css|json|html)$'
+        entry: bash -c 'cd apps/web && npx --no-install prettier --write --ignore-unknown "${@#apps/web/}"' --
+        files: '^apps/web/'

@@ -9,7 +9,7 @@ EXPORT := $(UV) export --quiet --frozen --no-hashes --all-groups
 GATEWAY := services/gateway
 WEB := apps/web
 
-.PHONY: help setup requirements lint lint-py lint-go lint-web fmt test test-py test-go build-web \
+.PHONY: help setup sync requirements lint lint-py lint-go lint-web fmt test test-py test-go build-web \
 	pipeline restore eval loadtest
 
 help: ## List available targets
@@ -17,11 +17,14 @@ help: ## List available targets
 
 setup: ## Create .env, install Python/Go/Node dependencies and git hooks
 	@test -f .env || { cp .env.example .env && echo "Created .env from .env.example – fill in your values."; }
-	@for p in $(PROJECTS); do $(UV) sync --directory $$p || exit 1; done
+	@$(MAKE) --no-print-directory sync
 	cd $(GATEWAY) && go mod download
 	cd $(WEB) && npm ci
 	@$(UV) run pre-commit install || echo "WARNING: pre-commit hooks not installed – run: uv run pre-commit install"
 	@echo "ONNX weights are not downloaded yet – added with #11."
+
+sync: ## Install locked Python dependencies for every uv project (used by CI)
+	@for p in $(PROJECTS); do $(UV) sync --locked --directory $$p || exit 1; done
 
 requirements: ## Regenerate requirements.txt files from uv.lock (run after uv add/remove)
 	@for p in $(PROJECTS); do $(EXPORT) --directory $$p -o requirements.txt || exit 1; done

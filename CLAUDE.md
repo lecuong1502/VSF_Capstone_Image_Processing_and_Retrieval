@@ -43,7 +43,7 @@ make fmt           # ruff, gofmt, prettier
 make requirements  # regenerate requirements.txt files from uv.lock (lint fails if stale)
 ```
 
-Toolchains: Python 3.12 + uv, Go (version from `services/gateway/go.mod`), Node 22. CI (`.github/workflows/ci.yml`) runs `lint-*`, `test-*` and `build-web` in three jobs and is required to merge into `main`.
+Toolchains: Python 3.12 + uv, Go (version from `services/gateway/go.mod`), Node 22 (`apps/web/.nvmrc`). CI (`.github/workflows/ci.yml`) runs `lint-*`, `test-*` and `build-web` in three jobs and is required to merge into `main`.
 
 Python 3.12, dependencies managed only with `uv` (`uv add <pkg>`, never `pip install`). Run tools through `uv run`. Pre-commit hooks (ruff, mypy, gofmt/go vet, eslint/prettier, and a hook that rejects `data/` outside `data/sample/`, `models/`, `reports/`, weights (`*.onnx`, `*.pt`, `*.safetensors`, …), data files (`*.parquet`, `*.duckdb`, `*.sqlite`) and `.env*`) are defined in `.pre-commit-config.yaml` – never bypass them with `--no-verify`. `requirements.txt` files are generated from `uv.lock` for pip users – never edit them by hand.
 
