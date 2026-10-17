@@ -170,6 +170,11 @@ def test_export_uses_the_labels_shape(tmp_path: Path) -> None:
 
     assert frame.columns[: len(LABELS_SCHEMA)] == LABELS_SCHEMA.names()
     assert frame.height == 1  # undecided items are not exported
+
+    # rebuilding the queue without a field retracts that field's answers from the export
+    narrowed = item.model_copy(update={"fields": [Field(name="other", options=YES_NO)]})
+    write_queue(tmp_path, "kg", [narrowed])
+    assert export_queue(tmp_path, "kg").height == 0
     row = frame.row(0, named=True)
     assert row["source"] == "human"
     assert (row["criterion"], row["value"]) == ("edge_correct", "yes")

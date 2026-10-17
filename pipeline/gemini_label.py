@@ -298,11 +298,18 @@ def audit_sample(labels: pl.DataFrame, *, n: int, seed: int, per_positive: int) 
 
 
 def write_audit_queue(
-    data_dir: Path, review_dir: Path, *, image_ids: list[int], name: str = AUDIT_QUEUE
+    data_dir: Path,
+    review_dir: Path,
+    *,
+    image_ids: list[int],
+    name: str = AUDIT_QUEUE,
+    criteria: Sequence[str] | None = None,
 ) -> Path:
-    """Blind /review queue over every criterion for `image_ids`, judged against the same entity
-    as the Gemini prompt (`builders.one_entity_per_image`)."""
-    items = builders.moderation_queue(data_dir, n=len(image_ids), seed=0, image_ids=image_ids)
+    """Blind /review queue over `criteria` (default: every audited one) for `image_ids`, judged
+    against the same entity as the Gemini prompt (`builders.one_entity_per_image`)."""
+    items = builders.moderation_queue(
+        data_dir, n=len(image_ids), seed=0, image_ids=image_ids, criteria=criteria
+    )
     return write_queue(review_dir, name, items)
 
 
@@ -392,6 +399,11 @@ def main() -> None:
     audit_p.add_argument("--per-positive", type=int, default=40)
     audit_p.add_argument("--seed", type=int, default=0)
     audit_p.add_argument("--force", action="store_true", help="replace an existing audit queue")
+    audit_p.add_argument(
+        "--criteria",
+        nargs="+",
+        help="ask only these (rebuilding with fewer retracts the others' answers from export)",
+    )
     sub.add_parser("kappa", help="Cohen's kappa per criterion, Gemini vs. the audit")
     args = parser.parse_args()
 
@@ -436,7 +448,9 @@ def main() -> None:
         labels = pl.read_parquet(labels_path(data_dir))
         audit = audit_sample(labels, n=args.n, seed=args.seed, per_positive=args.per_positive)
         atomic_write(audit_ids_path(data_dir), audit.write_parquet)
-        path = write_audit_queue(data_dir, reviews, image_ids=audit["image_id"].to_list())
+        path = write_audit_queue(
+            data_dir, reviews, image_ids=audit["image_id"].to_list(), criteria=args.criteria
+        )
         log.info("Wrote %d items to %s\n%s", audit.height, path, audit["stratum"].value_counts())
     else:
         table = kappa_table(data_dir, reviews)

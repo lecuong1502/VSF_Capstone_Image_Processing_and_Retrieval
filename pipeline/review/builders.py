@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Sequence
 from pathlib import Path
 
 import polars as pl
@@ -119,10 +120,16 @@ def one_entity_per_image(pairs: pl.DataFrame) -> pl.DataFrame:
 
 
 def moderation_queue(
-    data_dir: Path, *, n: int, seed: int, image_ids: list[int] | None = None
+    data_dir: Path,
+    *,
+    n: int,
+    seed: int,
+    image_ids: list[int] | None = None,
+    criteria: Sequence[str] | None = None,
 ) -> list[Item]:
     """Blind audit of every spec criterion for `n` images (or exactly `image_ids`), each shown
     with one of its labeled entities."""
+    fields = [f for f in MODERATION_FIELDS if criteria is None or f.name in criteria]
     pairs = labeled_pairs(data_dir)
     one = one_entity_per_image(pairs)
     if image_ids is not None:
@@ -140,7 +147,7 @@ def moderation_queue(
             entity_id=row["entity_id"],
             context=_entity_context(entities[row["entity_id"]]),
             references=_pick(refs.get(row["entity_id"], []), row["image_id"]),
-            fields=list(MODERATION_FIELDS),
+            fields=fields,
         )
         for row in picked.sort("image_id").iter_rows(named=True)
     ]

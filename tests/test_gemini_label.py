@@ -302,6 +302,13 @@ def test_kappa_table_against_the_human_audit(data_dir: Path, tmp_path: Path) -> 
     assert row["gemini_positive"] == 2 and row["human_positive"] == 1
     shot = table.filter(pl.col("criterion") == "shot_type").row(0, named=True)
     assert (shot["n"], shot["kappa"]) == (0, None)  # not in the audit (learned from query_type)
+
+    # narrowing the audit to relevance retracts the other answers
+    write_audit_queue(
+        data_dir, review, image_ids=[1, 2, 3, 4], name="gemini-audit", criteria=["relevance"]
+    )
+    narrowed = kappa_table(data_dir, review, "gemini-audit")
+    assert narrowed.filter(pl.col("n") > 0)["criterion"].to_list() == ["relevance"]
     assert set(table["criterion"]) == set(CRITERIA)
     assert row["n_random"] == 1  # image 3; image 4 was unsure
 
