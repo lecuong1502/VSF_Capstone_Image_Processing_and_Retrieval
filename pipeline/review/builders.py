@@ -45,7 +45,8 @@ def _sample(frame: pl.DataFrame, n: int, seed: int, by: list[str]) -> pl.DataFra
     return frame.sample(n=min(n, frame.height), seed=seed, shuffle=True)
 
 
-def _labeled_pairs(data_dir: Path) -> pl.DataFrame:
+def labeled_pairs(data_dir: Path) -> pl.DataFrame:
+    """Non-conflicting yes/no relevance labels of reviewable images."""
     labels = pl.read_parquet(data_dir / "ingest" / "labels.parquet").filter(
         (pl.col("criterion") == "relevance")
         & pl.col("value").is_in(["yes", "no"])
@@ -79,7 +80,7 @@ def _pick(refs: list[int], image_id: int | None) -> list[int]:
 
 def relevance_queue(data_dir: Path, *, n: int, seed: int, blind: bool) -> list[Item]:
     """Audit the human `verify` labels; `blind` hides the existing label (for kappa)."""
-    pairs = _labeled_pairs(data_dir)
+    pairs = labeled_pairs(data_dir)
     titles = pl.read_parquet(data_dir / "ingest" / "images.parquet").select(
         "image_id", "page_title"
     )
@@ -109,19 +110,25 @@ def relevance_queue(data_dir: Path, *, n: int, seed: int, blind: bool) -> list[I
     return items
 
 
+def one_entity_per_image(pairs: pl.DataFrame) -> pl.DataFrame:
+    """The entity an image is judged against: an accepted one if any, else the first by id.
+    Gemini labeling (#13) uses the same rule, so its prompt and the audit show the same entity."""
+    return pairs.sort("image_id", pl.col("value") != "yes", "entity_id").unique(
+        "image_id", keep="first", maintain_order=True
+    )
+
+
 def moderation_queue(
     data_dir: Path, *, n: int, seed: int, image_ids: list[int] | None = None
 ) -> list[Item]:
     """Blind audit of every spec criterion for `n` images (or exactly `image_ids`), each shown
     with one of its labeled entities."""
-    pairs = _labeled_pairs(data_dir)
+    pairs = labeled_pairs(data_dir)
+    one = one_entity_per_image(pairs)
     if image_ids is not None:
-        pairs = pairs.filter(pl.col("image_id").is_in(image_ids))
-    # one entity per image, preferring an accepted one
-    one = pairs.sort("image_id", pl.col("value") != "yes", "entity_id").unique(
-        "image_id", keep="first"
-    )
-    picked = one if image_ids is not None else _sample(one, n, seed, ["image_id"])
+        picked = one.filter(pl.col("image_id").is_in(image_ids))
+    else:
+        picked = _sample(one, n, seed, ["image_id"])
     entities = _entities(data_dir)
     refs = _references(pairs, seed)
     return [
@@ -152,7 +159,7 @@ def kg_queue(data_dir: Path, edges_path: Path, *, n: int, seed: int) -> list[Ite
     """Hand-check `n` KG edges (`src`, `rel`, `dst`, optional `evidence`, `confidence`)."""
     edges = _read_edges(edges_path)
     entities = _entities(data_dir)
-    refs = _references(_labeled_pairs(data_dir), seed)
+    refs = _references(labeled_pairs(data_dir), seed)
 
     def name(node: str) -> str:
         return str(entities[node]["entity_name"]) if node in entities else node

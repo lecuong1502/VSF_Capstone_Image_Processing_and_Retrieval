@@ -10,7 +10,7 @@ GATEWAY := services/gateway
 WEB := apps/web
 
 .PHONY: help setup sync requirements lint lint-py lint-go lint-web fmt test test-py test-go test-web build-web \
-	gemini-cost gemini-smoke ingest sample profile download dedup dedup-sheet embed embed-bench review pipeline restore eval loadtest
+	gemini-cost gemini-smoke ingest sample profile download dedup dedup-sheet embed embed-bench review gemini-label pipeline restore eval loadtest
 
 help: ## List available targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-14s %s\n", $$1, $$2}'
@@ -97,6 +97,9 @@ embed: ## Embed every downloaded image with EMBED_MODEL (FP16 ONNX on GPU) → $
 
 embed-bench: ## Images/s per batch size for EMBED_MODEL on this GPU
 	$(UV) run python -m pipeline.embed bench
+
+gemini-label: ## Gemini moderation labels for 5k images (paid, Batch API); pilot: python -m pipeline.gemini_label run --limit 100
+	$(UV) run python -m pipeline.gemini_label run
 
 review: build-web ## Serve the /review tool on http://127.0.0.1:8765/review (queues: python -m pipeline.review queue …)
 	$(UV) run python -m pipeline.review serve
