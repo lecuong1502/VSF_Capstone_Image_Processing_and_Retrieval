@@ -41,6 +41,7 @@ make test          # test-py (pytest per project) + test-go
 make build-web     # tsc + vite build
 make fmt           # ruff, gofmt, prettier
 make requirements  # regenerate requirements.txt files from uv.lock (lint fails if stale)
+make gemini-cost   # Gemini spend per step vs budget (make gemini-smoke: one real ~$0.0001 call)
 ```
 
 Toolchains: Python 3.12 + uv, Go (version from `services/gateway/go.mod`), Node 22 (`apps/web/.nvmrc`). CI (`.github/workflows/ci.yml`) runs `lint-*`, `test-*` and `build-web` in three jobs and is required to merge into `main`.
@@ -61,7 +62,7 @@ To implement an issue, follow the repo skill `.claude/skills/work-on-issue/SKILL
 - **Data**: input is the six `*_verified.csv` files in `RAW_DATA_DIR` (default `~/Desktop/vinhomes-crawler/detect_human`). Scale target is **62,204 unique URLs** (not 80k). Labels keyed by `(image_url, entity_id)`; on conflict the newer export wins (`Cuong_entity_new_*` > `bo_sung_*` > `Cuong_phan_cong_*`) and conflicting pairs are flagged and excluded from training/eval; empty `verify` = `unlabeled`.
 - **Never commit** anything under `data/` except `data/sample/`, model weights, `.env`, images, thumbnails, snapshots. The repo is public.
 - **People**: face detection only – no face recognition, no face embeddings. Person/relation queries resolve via the KG and `entity_id`.
-- **Gemini** (`gemini-3.5-flash-lite`, the only LLM): every call goes through the shared client with spend guard (`GEMINI_BUDGET_USD`, starting at $5), content-hash cache and Batch API for offline jobs. Report tokens and USD in PRs that spend money.
+- **Gemini** (`gemini-3.5-flash-lite`, the only LLM): every call goes through `pipeline.gemini` – get a client with `pipeline.gemini.sdk.client_from_env()`, call `.generate(step, GeminiRequest(...))` online or `.batch(step, requests)` for offline jobs. It enforces the spend cap (`GEMINI_BUDGET_USD`, starting at $5), caches by content hash under `$DATA_DIR/cache/gemini` and logs every call to `$DATA_DIR/gemini_usage.parquet`. Tests use a fake `Transport`, never the real API. Report tokens and USD (`make gemini-cost`) in PRs that spend money.
 - **Models**: pipeline runs end-to-end with `jinaai/jina-clip-v2` first; bake-off vs. `siglip2-base` and `siglip2-so400m` later. Must fit a 6 GB RTX 4050.
 - **Deployment**: local `docker compose` + images on GHCR. Public deployment is Backlog.
 - **Test set**: full spec scale (150/100/60/30 queries, pool top-20, 20% human check).

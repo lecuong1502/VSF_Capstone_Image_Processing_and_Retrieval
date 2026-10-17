@@ -5,7 +5,11 @@ description = "Offline pipeline and evaluation for Vietnamese travel image moder
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.12,<3.13"
-dependencies = []
+dependencies = [
+    "google-genai>=2.31.0",
+    "polars>=2.0.0",
+    "python-dotenv>=1.2.4",
+]
 
 [dependency-groups]
 dev = [
