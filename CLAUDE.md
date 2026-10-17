@@ -44,6 +44,7 @@ make build-web     # tsc + vite build
 make fmt           # ruff, gofmt, prettier
 make requirements  # regenerate requirements.txt files from uv.lock (lint fails if stale)
 make gemini-cost   # Gemini spend per step vs budget (make gemini-smoke: one real ~$0.0001 call)
+make profile       # reports/data_profile.html: verify rates by size/source/query_type/branch/priority (after make ingest)
 make ingest        # merge RAW_DATA_DIR CSVs → $DATA_DIR/ingest/{entities,images,labels}.parquet, conflicts.csv, vsf.duckdb
 ```
 
