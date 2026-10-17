@@ -9,6 +9,7 @@ dependencies = [
     "duckdb>=1.5.6",
     "google-genai>=2.31.0",
     "img2dataset>=1.47.0",
+    "pdqhash>=0.2.8",
     "pillow>=13.0.0",
     "polars>=2.0.0",
     "python-dotenv>=1.2.4",
@@ -43,7 +44,7 @@ strict = true
 packages = ["pipeline", "eval", "tests"]
 
 [[tool.mypy.overrides]]
-module = ["img2dataset", "img2dataset.*"]
+module = ["img2dataset", "img2dataset.*", "pdqhash"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

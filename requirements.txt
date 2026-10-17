@@ -137,6 +137,8 @@ pandas==2.3.3
     # via img2dataset
 pathspec==1.1.1
     # via mypy
+pdqhash==0.2.8
+    # via vsf-pipeline
 pillow==13.0.0
     # via vsf-pipeline
 platformdirs==4.13.3

@@ -46,6 +46,8 @@ make requirements  # regenerate requirements.txt files from uv.lock (lint fails 
 make gemini-cost   # Gemini spend per step vs budget (make gemini-smoke: one real ~$0.0001 call)
 make profile       # reports/data_profile.html: verify rates by size/source/query_type/branch/priority (after make ingest)
 make download      # img2dataset → $DATA_DIR/download/{runs/*.tar,image_assets.parquet} + $DATA_DIR/thumbs/*.webp; re-run retries only transient failures
+make dedup         # PDQ hashes + duplicate clusters → $DATA_DIR/dedup/{pdq,pdq_pairs,dedup_members}.parquet, summary.json
+make dedup-sheet   # reports/dedup_pairs.html for labeling; then: uv run python -m pipeline.hashing evaluate --labels <csv>
 make ingest        # merge RAW_DATA_DIR CSVs → $DATA_DIR/ingest/{entities,images,labels}.parquet, conflicts.csv, vsf.duckdb
 ```
 

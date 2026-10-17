@@ -10,7 +10,7 @@ GATEWAY := services/gateway
 WEB := apps/web
 
 .PHONY: help setup sync requirements lint lint-py lint-go lint-web fmt test test-py test-go build-web \
-	gemini-cost gemini-smoke ingest sample profile download pipeline restore eval loadtest
+	gemini-cost gemini-smoke ingest sample profile download dedup dedup-sheet pipeline restore eval loadtest
 
 help: ## List available targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-14s %s\n", $$1, $$2}'
@@ -83,7 +83,13 @@ profile: ## HTML data profile of the ingest tables → reports/data_profile.html
 download: ## Download all images (img2dataset → WebDataset + WebP thumbs); re-run retries transient failures
 	$(UV) run python -m pipeline.download
 
-pipeline: ingest download ## Run the offline pipeline (ingest → … → index)
+dedup: ## PDQ hashes + SHA/PDQ duplicate clusters → $DATA_DIR/dedup (re-run hashes only new images)
+	$(UV) run python -m pipeline.hashing run
+
+dedup-sheet: ## 300 stratified PDQ pairs to label → reports/dedup_pairs.html
+	$(UV) run python -m pipeline.hashing label-sheet
+
+pipeline: ingest download dedup ## Run the offline pipeline (ingest → … → index)
 	@echo "Steps after ingest are not implemented yet – see milestones M1/M2."
 
 restore: ## Restore Qdrant snapshot + thumbnails

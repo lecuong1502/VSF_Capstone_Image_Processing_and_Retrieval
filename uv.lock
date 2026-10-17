@@ -747,6 +747,16 @@ wheels = [
 ]
 
 [[package]]
+name = "pdqhash"
+version = "0.2.8"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/98/83/258f070fbe134c2bd6f20dc0a9b142842ff35bc1369a98e7df30b496177b/pdqhash-0.2.8.tar.gz", hash = "sha256:eb9a9de36745937ce3e481a02ce933fe907c84e0b1748c9dfea52c12ca5c1e35", size = 696702, upload-time = "2025-05-28T23:07:13.694Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ce/76/8411975e8d0b5b4d7aeeedfff55101074c96d7b842377e9eb2f02181f0ea/pdqhash-0.2.8-cp312-cp312-macosx_10_13_universal2.whl", hash = "sha256:13f106595b566677b0a125d96c6910fd1f1bbf2e86aae3a36ca8e0ed67ded02c", size = 108491, upload-time = "2025-05-28T23:07:06.778Z" },
+    { url = "https://files.pythonhosted.org/packages/28/e9/80bd1f68066f6ce4ae06cfdc48fe4ca454d6868b16de878cdb8fed434b04/pdqhash-0.2.8-cp312-cp312-win_amd64.whl", hash = "sha256:fe082d83432583eaf7938fade50ec14e2ecc597b648dbca3419703b7a36f07f0", size = 43371, upload-time = "2025-05-28T23:07:07.678Z" },
+]
+
+[[package]]
 name = "pillow"
 version = "13.0.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1244,6 +1254,7 @@ dependencies = [
     { name = "duckdb" },
     { name = "google-genai" },
     { name = "img2dataset" },
+    { name = "pdqhash" },
     { name = "pillow" },
     { name = "polars" },
     { name = "python-dotenv" },
@@ -1263,6 +1274,7 @@ requires-dist = [
     { name = "duckdb", specifier = ">=1.5.6" },
     { name = "google-genai", specifier = ">=2.31.0" },
     { name = "img2dataset", specifier = ">=1.47.0" },
+    { name = "pdqhash", specifier = ">=0.2.8" },
     { name = "pillow", specifier = ">=13.0.0" },
     { name = "polars", specifier = ">=2.0.0" },
     { name = "python-dotenv", specifier = ">=1.2.4" },
