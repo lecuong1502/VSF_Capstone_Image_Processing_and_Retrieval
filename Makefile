@@ -3,8 +3,9 @@ SHELL := /bin/bash
 
 SEARCH_DIR := services/search
 UV_SEARCH := env -u VIRTUAL_ENV uv run --directory $(SEARCH_DIR)
+EXPORT := uv export --quiet --frozen --no-hashes --no-emit-project --all-groups
 
-.PHONY: help setup lint fmt test pipeline restore eval loadtest
+.PHONY: help setup requirements lint fmt test pipeline restore eval loadtest
 
 help: ## List available targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-10s %s\n", $$1, $$2}'
@@ -14,7 +15,13 @@ setup: ## Install Python dependencies (root project + search-api)
 	uv sync
 	env -u VIRTUAL_ENV uv sync --directory $(SEARCH_DIR)
 
-lint: ## Ruff (lint + format check) and mypy
+requirements: ## Regenerate requirements.txt files from uv.lock (run after uv add/remove)
+	$(EXPORT) -o requirements.txt
+	env -u VIRTUAL_ENV $(EXPORT) --directory $(SEARCH_DIR) -o requirements.txt
+
+lint: ## Ruff (lint + format check), mypy, requirements.txt in sync with uv.lock
+	@diff -q <($(EXPORT) | grep -v '^#') <(grep -v '^#' requirements.txt) >/dev/null || { echo "requirements.txt is stale – run: make requirements"; exit 1; }
+	@diff -q <(env -u VIRTUAL_ENV $(EXPORT) --directory $(SEARCH_DIR) | grep -v '^#') <(grep -v '^#' $(SEARCH_DIR)/requirements.txt) >/dev/null || { echo "$(SEARCH_DIR)/requirements.txt is stale – run: make requirements"; exit 1; }
 	uv run ruff check .
 	uv run ruff format --check .
 	uv run mypy

@@ -97,7 +97,7 @@ docker compose -f deploy/docker-compose.yml up -d
 - `ruff format` + `ruff check`; type-check with `mypy`.
 - Type hints on all public functions; use `pathlib` and `logging` (no `print` in services).
 - Pipeline steps must be **idempotent** (re-running never duplicates data) and configured via CLI flags or environment variables – no hard-coded paths.
-- Manage dependencies with `uv`; update `uv.lock` whenever `pyproject.toml` changes.
+- Manage dependencies with `uv` (`uv add` / `uv remove`), then run `make requirements` and commit `pyproject.toml`, `uv.lock` and `requirements.txt` together. pip users can install with `pip install -r requirements.txt`.
 
 **Go** (`services/gateway`)
 - Clean `gofmt` / `go vet`; `go test ./...` passes.
