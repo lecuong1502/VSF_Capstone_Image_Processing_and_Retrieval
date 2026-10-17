@@ -55,4 +55,5 @@ jobs:
         run: npm ci
         working-directory: apps/web
       - run: make lint-web
+      - run: make test-web
       - run: make build-web

@@ -136,7 +136,7 @@ docker compose -f deploy/docker-compose.yml up -d
 open http://localhost:8080
 ```
 
-Useful targets: `make lint test`, `make eval`, `make loadtest`.
+Useful targets: `make lint test`, `make review` (keyboard-only human review at `http://127.0.0.1:8765/review`), `make eval`, `make loadtest`.
 
 ## Results
 
