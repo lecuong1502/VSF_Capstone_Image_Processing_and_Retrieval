@@ -279,7 +279,7 @@ def test_kappa_table_against_the_human_audit(data_dir: Path, tmp_path: Path) -> 
     store = DecisionStore(review, "gemini-audit")
     human = {1: "yes", 2: "no", 3: "no", 4: "unsure"}  # 4 is excluded as unsure
     for item in items.values():
-        values = {f.name: f.options[1].value for f in item.fields}  # "no" / CHECKIN
+        values = {f.name: f.options[1].value for f in item.fields}  # "no"
         values["watermark"] = human[item.image_id or 0]
         values["relevance"] = "yes"
         store.append(
@@ -301,10 +301,9 @@ def test_kappa_table_against_the_human_audit(data_dir: Path, tmp_path: Path) -> 
     assert (row["n"], row["agreement"]) == (3, pytest.approx(2 / 3))
     assert row["gemini_positive"] == 2 and row["human_positive"] == 1
     shot = table.filter(pl.col("criterion") == "shot_type").row(0, named=True)
-    assert shot["agreement"] == 0.0  # Gemini PHONG_CANH vs human CHECKIN
+    assert (shot["n"], shot["kappa"]) == (0, None)  # not in the audit (learned from query_type)
     assert set(table["criterion"]) == set(CRITERIA)
     assert row["n_random"] == 1  # image 3; image 4 was unsure
-    assert shot["gemini_positive"] is None  # multi-class
 
     # a re-run of ingest that changes an image's entity must not be compared silently
     labels = pl.read_parquet(labels_path(data_dir))

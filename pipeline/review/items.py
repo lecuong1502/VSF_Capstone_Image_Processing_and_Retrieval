@@ -33,8 +33,12 @@ class Field(BaseModel):
     name: str
     options: list[Option]
     label: str = ""
-    # Pre-filled answer the human confirms with Enter. Leave it None for blind audits (kappa).
+    # Pre-filled answer the human confirms with Enter. For kappa audits it must not come from the
+    # rater being audited (a fixed prior like "no" is fine, Gemini's answer is not).
     default: str | None = None
+    # A key that flips the field between its first two options whichever field is active, so a
+    # mostly-"no" flag costs no keystroke and a "yes" costs one.
+    toggle_key: str | None = None
 
     @model_validator(mode="after")
     def _check(self) -> Self:
@@ -45,6 +49,10 @@ class Field(BaseModel):
             raise ValueError(f"field {self.name}: keys {sorted(RESERVED_KEYS)} are reserved")
         if self.default is not None and self.default not in {o.value for o in self.options}:
             raise ValueError(f"field {self.name}: default {self.default!r} is not an option")
+        if self.toggle_key is not None and (
+            len(self.options) < 2 or self.toggle_key in RESERVED_KEYS | set(keys)
+        ):
+            raise ValueError(f"field {self.name}: toggle key {self.toggle_key!r} is not usable")
         return self
 
 
@@ -63,12 +71,23 @@ class Item(BaseModel):
     model_version: str | None = None  # of the model that put the item in the queue (spec §4.1 T5)
     export_keys: dict[str, str] = {}  # columns copied into the export (e.g. src/rel/dst, qid)
 
+    @model_validator(mode="after")
+    def _check_toggles(self) -> Self:
+        toggles = [f.toggle_key for f in self.fields if f.toggle_key is not None]
+        option_keys = {o.key for f in self.fields for o in f.options}
+        if len(set(toggles)) != len(toggles) or option_keys & set(toggles):
+            raise ValueError(f"item {self.item_id}: toggle keys must be unique and unused")
+        return self
 
-def yes_no(name: str, label: str = "", default: str | None = None) -> Field:
+
+def yes_no(
+    name: str, label: str = "", default: str | None = None, toggle_key: str | None = None
+) -> Field:
     return Field(
         name=name,
         label=label or name,
         default=default,
+        toggle_key=toggle_key,
         options=[
             Option(value="yes", key="y", label="có"),
             Option(value="no", key="n", label="không"),
@@ -77,24 +96,21 @@ def yes_no(name: str, label: str = "", default: str | None = None) -> Field:
     )
 
 
-# Spec §4.1 Gemini schema: one blind field per criterion.
+def _flag(name: str, label: str, toggle_key: str) -> Field:
+    """A rare-positive criterion: pre-filled "no" (a fixed prior, not any rater's answer)."""
+    return yes_no(name, label, default="no", toggle_key=toggle_key)
+
+
+# Spec §4.1 Gemini schema minus shot_type (its head learns from the `query_type` column, spec
+# §4.1 table). One key per typical image: flags default to "no" and flip with their toggle key;
+# relevance has no default and comes last, so answering it submits the item.
 MODERATION_FIELDS = [
+    _flag("watermark", "Watermark / logo đè ảnh?", "w"),
+    _flag("text_overlay", "Chữ quảng cáo / khung?", "t"),
+    _flag("nsfw", "NSFW?", "x"),
+    _flag("political", "Nhạy cảm chính trị?", "p"),
+    _flag("violence", "Bạo lực?", "v"),
     yes_no("relevance", "Đúng thực thể?"),
-    yes_no("watermark", "Watermark / logo đè ảnh?"),
-    yes_no("text_overlay", "Chữ quảng cáo / khung?"),
-    yes_no("nsfw", "NSFW?"),
-    yes_no("political", "Nhạy cảm chính trị?"),
-    yes_no("violence", "Bạo lực?"),
-    Field(
-        name="shot_type",
-        label="Loại ảnh",
-        options=[
-            Option(value="PHONG_CANH", key="1", label="phong cảnh"),
-            Option(value="CHECKIN", key="2", label="check-in"),
-            Option(value="FLYCAM", key="3", label="flycam"),
-            Option(value="KHAC", key="4", label="khác"),
-        ],
-    ),
 ]
 
 
