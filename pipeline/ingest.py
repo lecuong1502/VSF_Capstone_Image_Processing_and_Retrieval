@@ -6,6 +6,12 @@ Merge rules (CLAUDE.md "Decisions"):
   and listed in conflicts.csv (excluded from training/eval downstream);
 - an empty `verify` is `unlabeled` unless another export labels the pair.
 
+Deviation from the spec's §7 DBML: `images` holds one row per URL with no `entity_id`, because
+~7k URLs belong to several entities. Per-(image, entity) fields (relevance label, query_type,
+note, annotator) live in `labels`; join on `image_id` to get an image's entities. URLs are only
+whitespace-stripped (e.g. http:// and https:// variants stay separate rows); exact duplicates
+are removed later by hashing (#10).
+
 Usage: python -m pipeline.ingest [--raw-dir DIR] [--out-dir DIR]
 """
 
@@ -43,6 +49,9 @@ OPTIONAL_COLUMNS = (
     "query_type",
     "assigned_member",
     "note",
+    "ghi_chu",  # entity-level QA note on the description (constant per entity)
+    "nguon",  # crawl batch name (bo_sung only)
+    "crawled_at",  # bo_sung only
 )
 VERIFY_VALUES = {"yes", "no"}
 UNLABELED = "unlabeled"
@@ -82,7 +91,7 @@ def ingest(raw_dir: Path) -> IngestResult:
     ranked = rows.sort(["tier", "source", "row_order"], descending=[True, False, False])
     labels, conflicts = _labels(ranked)
     return IngestResult(
-        entities=_entities(ranked),
+        entities=_entities(ranked, labels),
         images=_images(ranked),
         labels=labels,
         conflicts=conflicts,
@@ -126,7 +135,7 @@ def _read_export(path: Path) -> pl.DataFrame:
             f"expected {sorted(VERIFY_VALUES)} or empty"
         )
     empty_keys = frame.filter(
-        pl.col("image_url").is_null() | (pl.col("image_url") == "") | pl.col("entity_id").is_null()
+        pl.col("image_url").fill_null("").eq("") | pl.col("entity_id").fill_null("").eq("")
     )
     if empty_keys.height:
         raise IngestError(f"{path.name}: {empty_keys.height} row(s) without image_url/entity_id")
@@ -135,29 +144,26 @@ def _read_export(path: Path) -> pl.DataFrame:
 
 
 def _labels(ranked: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """One row per (image_url, entity_id). `ranked` is sorted best-row-first, and group_by with
+    maintain_order keeps that order inside each group, so `.first()` is the winning row."""
     pair = ["image_url", "entity_id"]
-    labeled = ranked.filter(pl.col("verify").is_not_null())
-    top_tier = labeled.group_by(pair).agg(pl.col("tier").max().alias("top_tier"))
+    in_top_tier = pl.col("tier") == pl.col("tier").first()
+    top_values = pl.col("verify").filter(in_top_tier)
     votes = (
-        labeled.join(top_tier, on=pair)
-        .group_by(pair)
+        ranked.filter(pl.col("verify").is_not_null())
+        .group_by(pair, maintain_order=True)
         .agg(
-            pl.col("verify").n_unique().alias("n_values"),
+            (pl.col("verify").n_unique() > 1).alias("label_conflict"),
             # Disagreement inside the winning family can't be resolved by recency: be conservative.
-            pl.when((pl.col("tier") == pl.col("top_tier")).sum() > 0)
-            .then(
-                pl.when(
-                    pl.col("verify").filter(pl.col("tier") == pl.col("top_tier")).n_unique() > 1
-                )
-                .then(pl.lit("no"))
-                .otherwise(pl.col("verify").filter(pl.col("tier") == pl.col("top_tier")).first())
-            )
+            pl.when(top_values.n_unique() > 1)
+            .then(pl.lit("no"))
+            .otherwise(top_values.first())
             .alias("value"),
             pl.concat_str(pl.col("source"), pl.lit("="), pl.col("verify"))
             .unique()
             .sort()
             .str.join(";")
-            .alias("labels"),
+            .alias("votes"),
             pl.col("source").first().alias("label_source"),
             pl.col("assigned_member").first().alias("label_annotator"),
             pl.col("note").first().alias("label_note"),
@@ -166,49 +172,57 @@ def _labels(ranked: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame]:
     )
     best = ranked.group_by(pair, maintain_order=True).first()
     labels = (
-        best.join(votes, on=pair, how="left")
+        best.join(votes, on=pair, how="left", maintain_order="left")
         .select(
             "image_id",
             "image_url",
             "entity_id",
             pl.lit("relevance").alias("criterion"),
             pl.col("value").fill_null(UNLABELED),
-            (pl.col("n_values").fill_null(0) > 1).alias("label_conflict"),
+            pl.col("label_conflict").fill_null(False),
             pl.coalesce("label_query_type", "query_type").alias("query_type"),
             pl.coalesce("label_source", "source").alias("source"),
             pl.coalesce("label_annotator", "assigned_member").alias("annotator"),
             pl.coalesce("label_note", "note").alias("note"),
-            "labels",
+            "votes",
         )
         .sort(pair)
     )
     conflicts = labels.filter("label_conflict").select(
-        "image_id", "image_url", "entity_id", "value", "labels"
+        "image_id", "image_url", "entity_id", "value", pl.col("votes").alias("labels")
     )
-    return labels.drop("labels"), conflicts
+    return labels.drop("votes"), conflicts
+
+
+def _first_per(ranked: pl.DataFrame, key: str) -> pl.DataFrame:
+    """The best-ranked row for each value of `key`, sorted by `key`."""
+    return ranked.group_by(key, maintain_order=True).first().sort(key)
 
 
 def _images(ranked: pl.DataFrame) -> pl.DataFrame:
-    return (
-        ranked.group_by("image_url", maintain_order=True)
-        .first()
-        .select(
-            "image_id",
-            "image_url",
-            "page_url",
-            "page_title",
-            "image_source",
-            pl.col("image_width").cast(pl.Int32, strict=False).alias("declared_w"),
-            pl.col("image_height").cast(pl.Int32, strict=False).alias("declared_h"),
-        )
-        .sort("image_url")
+    return _first_per(ranked, "image_url").select(
+        "image_id",
+        "image_url",
+        "page_url",
+        "page_title",
+        "image_source",
+        pl.col("image_width").cast(pl.Int32, strict=False).alias("declared_w"),
+        pl.col("image_height").cast(pl.Int32, strict=False).alias("declared_h"),
+        pl.col("nguon").alias("crawl_batch"),
+        "crawled_at",
     )
 
 
-def _entities(ranked: pl.DataFrame) -> pl.DataFrame:
+def _entities(ranked: pl.DataFrame, labels: pl.DataFrame) -> pl.DataFrame:
+    # Spec §2.1: entities with < 5 relevant images fall back to text-only matching.
+    n_yes = (
+        labels.filter((pl.col("value") == "yes") & ~pl.col("label_conflict"))
+        .group_by("entity_id")
+        .agg(pl.len().cast(pl.Int32).alias("n_yes_images"))
+    )
     return (
-        ranked.group_by("entity_id", maintain_order=True)
-        .first()
+        _first_per(ranked, "entity_id")
+        .join(n_yes, on="entity_id", how="left", maintain_order="left")
         .select(
             "entity_id",
             "entity_name",
@@ -216,14 +230,15 @@ def _entities(ranked: pl.DataFrame) -> pl.DataFrame:
             "branch",
             "leaf_label",
             "description",
+            pl.col("ghi_chu").alias("description_note"),
             "priority",
             pl.col("score").cast(pl.Float64, strict=False),
-            # Filled later by the KG step (#18) and Gemini visual attributes.
+            pl.col("n_yes_images").fill_null(0),
+            # Filled later by the KG step (#18) and Gemini visual attributes (spec §7).
             pl.lit(None, pl.String).alias("province"),
             pl.lit(None, pl.List(pl.String)).alias("aliases"),
             pl.lit(None, pl.String).alias("visual_attributes"),
         )
-        .sort("entity_id")
     )
 
 
