@@ -35,7 +35,7 @@ from pipeline.download import assets_path
 from pipeline.files import atomic_write, atomic_write_text
 from pipeline.gemini import GeminiClient, GeminiRequest, Image
 from pipeline.review import builders
-from pipeline.review.items import write_queue
+from pipeline.review.items import queue_path, review_dir, write_queue
 from pipeline.review.store import export_queue
 
 log = logging.getLogger(__name__)
@@ -44,6 +44,9 @@ STEP = "gemini_label"
 AUDIT_QUEUE = "gemini-audit"
 BOOLEAN_CRITERIA = ("watermark", "text_overlay", "nsfw", "political", "violence")
 CRITERIA = (*BOOLEAN_CRITERIA, "relevance", "shot_type")
+# The rare class per criterion (in the `labels` shape): audits are enriched with Gemini's
+# positives, since kappa is undefined without them. shot_type is multi-class.
+POSITIVE = {**dict.fromkeys(BOOLEAN_CRITERIA, "yes"), "relevance": "no"}
 # JSON with a ≤120-char reason is ~100 tokens; the rest is headroom for MINIMAL thinking.
 MAX_OUTPUT_TOKENS = 384
 
@@ -98,12 +101,12 @@ def labels_path(data_dir: Path) -> Path:
 def sample_images(data_dir: Path, *, n: int, seed: int) -> pl.DataFrame:
     """`n` reviewable images, each with its judging entity, stratified proportionally by entity
     branch × verify label (largest remainder), shuffled into a fixed labeling order."""
-    one = builders.one_entity_per_image(builders.labeled_pairs(data_dir))
+    judged = builders.one_entity_per_image(builders.labeled_pairs(data_dir))
     entities = pl.read_parquet(data_dir / "ingest" / "entities.parquet").select(
-        "entity_id", "entity_name", "leaf_label", "branch"
+        "entity_id", "entity_name", "leaf_label", pl.col("branch").fill_null("?")
     )
     pool = (
-        one.join(entities, on="entity_id")
+        judged.join(entities, on="entity_id")
         .select(
             "image_id",
             "entity_id",
@@ -146,6 +149,7 @@ class Summary:
     requested: int
     labeled: int
     failed: int
+    skipped_failed: int  # failed in an earlier run and not retried (no --retry-failed)
     input_tokens: int
     output_tokens: int
     usd: float  # paid in this run (cache hits are free)
@@ -161,14 +165,35 @@ class Summary:
 
 
 def run_labeling(
-    data_dir: Path, client: GeminiClient, *, n: int, seed: int, limit: int | None = None
+    data_dir: Path,
+    client: GeminiClient,
+    *,
+    n: int,
+    seed: int,
+    limit: int | None = None,
+    retry_failed: bool = False,
 ) -> Summary:
-    """Label the first `limit` (pilot) or all `n` sampled images. Repeats are served from the
-    client's cache, so a pilot followed by the full run pays for each image once."""
+    """Label the first `limit` (pilot) or all `n` sampled images and merge them into
+    `labels.parquet`. Successes are served from the client's cache on later runs, so a pilot
+    followed by the full run pays for each image once; failures are not cached, so they are
+    skipped unless `retry_failed` (a truncated answer would likely fail – and be paid – again)."""
     sample = sample_images(data_dir, n=n, seed=seed)
     out = out_dir(data_dir)
     atomic_write(out / "sample.parquet", sample.write_parquet)
+    previous = (
+        pl.read_parquet(labels_path(data_dir))
+        if labels_path(data_dir).exists()
+        else pl.DataFrame(schema=LABELS_SCHEMA)
+    )
     todo = sample.head(limit) if limit is not None else sample
+    skipped = 0
+    if not retry_failed:
+        failed_before = previous.filter(pl.col("error").is_not_null()).select(
+            "image_id", "entity_id"
+        )
+        kept = todo.join(failed_before, on=["image_id", "entity_id"], how="anti")
+        skipped = todo.height - kept.height
+        todo = kept
     thumbs = dict(pl.read_parquet(assets_path(data_dir)).select("image_id", "thumb_path").rows())
     rows = todo.to_dicts()
     requests = [build_request(r, (data_dir / thumbs[r["image_id"]]).read_bytes()) for r in rows]
@@ -189,8 +214,11 @@ def run_labeling(
             record |= result.parse(ModerationLabel).model_dump()
         records.append(record)
     labels = pl.DataFrame(records, schema=LABELS_SCHEMA)
-    atomic_write(labels_path(data_dir), labels.write_parquet)
-    atomic_write(out / "labels_gemini.parquet", to_labels_shape(labels).write_parquet)
+    merged = pl.concat(
+        [previous.join(labels.select("image_id"), on="image_id", how="anti"), labels]
+    ).sort("image_id")
+    atomic_write(labels_path(data_dir), merged.write_parquet)
+    atomic_write(out / "labels_gemini.parquet", to_labels_shape(merged).write_parquet)
 
     input_tokens = int(labels["input_tokens"].sum())
     output_tokens = int(labels["output_tokens"].sum())
@@ -199,6 +227,7 @@ def run_labeling(
         requested=len(rows),
         labeled=int(labels["error"].is_null().sum()),
         failed=int(labels["error"].is_not_null().sum()),
+        skipped_failed=skipped,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         usd=sum(r.usd for r in results),
@@ -235,20 +264,29 @@ def to_labels_shape(labels: pl.DataFrame) -> pl.DataFrame:
     )
 
 
-def audit_sample(labels: pl.DataFrame, *, n: int, seed: int, per_positive: int) -> list[int]:
-    """`n` labeled image_ids for the human audit: up to `per_positive` Gemini positives per
-    rare criterion first (kappa is undefined without positives), the rest at random."""
-    ok = labels.filter(pl.col("error").is_null()).sort("image_id")
-    rare = [*BOOLEAN_CRITERIA, "relevance"]
-    picked: list[int] = []
-    for criterion in rare:
-        positive = pl.col(criterion) if criterion != "relevance" else pl.col(criterion) != "yes"
-        ids = ok.filter(positive & ~pl.col("image_id").is_in(picked))["image_id"]
-        picked += ids.sample(n=min(per_positive, ids.len()), seed=seed).to_list()
-    rest = ok.filter(~pl.col("image_id").is_in(picked))["image_id"]
-    picked = picked[:n]
-    picked += rest.sample(n=min(n - len(picked), rest.len()), seed=seed).to_list()
-    return sorted(picked)
+def audit_sample(labels: pl.DataFrame, *, n: int, seed: int, per_positive: int) -> pl.DataFrame:
+    """`n` labeled images for the human audit (`image_id`, `stratum`): up to `per_positive`
+    Gemini positives per rare criterion (at most n / #criteria each, so every criterion gets
+    some), then a uniform random rest. Kappa on the `random` stratum estimates the population;
+    on all rows it is enriched toward positives."""
+    long = to_labels_shape(labels)
+    per = min(per_positive, n // len(POSITIVE))
+    picked: dict[int, str] = {}
+    for criterion, positive in POSITIVE.items():
+        ids = long.filter(
+            (pl.col("criterion") == criterion)
+            & (pl.col("value") == positive)
+            & ~pl.col("image_id").is_in(list(picked))
+        )["image_id"].sort()
+        for image_id in ids.sample(n=min(per, ids.len()), seed=seed).to_list():
+            picked[image_id] = f"positive:{criterion}"
+    rest = long.filter(~pl.col("image_id").is_in(list(picked)))["image_id"].unique().sort()
+    for image_id in rest.sample(n=min(n - len(picked), rest.len()), seed=seed).to_list():
+        picked[image_id] = "random"
+    return pl.DataFrame(
+        {"image_id": list(picked), "stratum": list(picked.values())},
+        schema={"image_id": pl.Int64, "stratum": pl.String},
+    ).sort("image_id")
 
 
 def write_audit_queue(
@@ -265,40 +303,67 @@ def cohen_kappa(a: Sequence[str], b: Sequence[str]) -> float | None:
     n = len(a)
     if n == 0:
         return None
-    observed = sum(x == y for x, y in zip(a, b, strict=True)) / n
+    observed = _agreement(a, b) or 0.0
     ca, cb = Counter(a), Counter(b)
     expected = sum(ca[k] * cb[k] for k in ca) / (n * n)
     return None if expected == 1 else (observed - expected) / (1 - expected)
 
 
+def audit_ids_path(data_dir: Path) -> Path:
+    return out_dir(data_dir) / "audit_ids.parquet"
+
+
 def kappa_table(data_dir: Path, review_dir: Path, queue: str = AUDIT_QUEUE) -> pl.DataFrame:
-    """Per criterion: n compared (both sure), agreement, kappa and positives per rater."""
-    human = export_queue(review_dir, queue).select("image_id", "criterion", "value")
+    """Per criterion: pairs compared (both raters sure, same image *and* entity), agreement and
+    kappa – on all audited rows and on the uniform `random` stratum – plus positives per rater."""
+    key = ["image_id", "entity_id", "criterion"]
+    human = export_queue(review_dir, queue).select(*key, "value")
     gemini = to_labels_shape(pl.read_parquet(labels_path(data_dir))).select(
-        "image_id", "criterion", pl.col("value").alias("gemini")
+        *key, pl.col("value").alias("gemini")
     )
-    joined = human.join(gemini, on=["image_id", "criterion"]).filter(
-        (pl.col("value") != "unsure") & (pl.col("gemini") != "unsure")
+    strata = audit_ids_path(data_dir)
+    stratum = (
+        pl.read_parquet(strata)
+        if strata.exists()
+        else pl.DataFrame(schema={"image_id": pl.Int64, "stratum": pl.String})
+    )
+    joined = (
+        human.join(gemini, on=key)
+        .join(stratum, on="image_id", how="left")
+        .filter((pl.col("value") != "unsure") & (pl.col("gemini") != "unsure"))
     )
     rows = []
     for criterion in CRITERIA:
         pairs = joined.filter(pl.col("criterion") == criterion)
+        uniform = pairs.filter(pl.col("stratum") == "random")
         g, h = pairs["gemini"].to_list(), pairs["value"].to_list()
-        positive = "PHONG_CANH" if criterion == "shot_type" else "yes"
-        if criterion == "relevance":
-            positive = "no"  # the rare, rejecting class
+        positive = POSITIVE.get(criterion)
         rows.append(
             {
                 "criterion": criterion,
                 "n": len(g),
-                "agreement": sum(x == y for x, y in zip(g, h, strict=True)) / len(g) if g else None,
+                "agreement": _agreement(g, h),
                 "kappa": cohen_kappa(g, h),
-                "gemini_positive": sum(x == positive for x in g),
-                "human_positive": sum(x == positive for x in h),
+                "n_random": uniform.height,
+                "kappa_random": cohen_kappa(
+                    uniform["gemini"].to_list(), uniform["value"].to_list()
+                ),
+                "gemini_positive": sum(x == positive for x in g) if positive else None,
+                "human_positive": sum(x == positive for x in h) if positive else None,
             }
         )
-    schema = {"agreement": pl.Float64, "kappa": pl.Float64}
+    schema = {
+        "agreement": pl.Float64,
+        "kappa": pl.Float64,
+        "kappa_random": pl.Float64,
+        "gemini_positive": pl.Int64,
+        "human_positive": pl.Int64,
+    }
     return pl.DataFrame(rows, schema_overrides=schema)
+
+
+def _agreement(a: Sequence[str], b: Sequence[str]) -> float | None:
+    return sum(x == y for x, y in zip(a, b, strict=True)) / len(a) if a else None
 
 
 def main() -> None:
@@ -310,28 +375,44 @@ def main() -> None:
     run.add_argument("--n", type=int, default=5000)
     run.add_argument("--limit", type=int, help="label only the first N of the sample (pilot)")
     run.add_argument("--seed", type=int, default=0)
-    audit = sub.add_parser("audit-queue", help="blind /review queue for the human audit")
-    audit.add_argument("--n", type=int, default=500)
-    audit.add_argument("--per-positive", type=int, default=40)
-    audit.add_argument("--seed", type=int, default=0)
-    audit.add_argument("--force", action="store_true", help="replace an existing audit queue")
+    run.add_argument("--retry-failed", action="store_true", help="re-request earlier failures")
+    run.add_argument(
+        "--skip-pilot", action="store_true", help="allow a full run without a --limit pilot first"
+    )
+    audit_p = sub.add_parser("audit-queue", help="blind /review queue for the human audit")
+    audit_p.add_argument("--n", type=int, default=500)
+    audit_p.add_argument("--per-positive", type=int, default=40)
+    audit_p.add_argument("--seed", type=int, default=0)
+    audit_p.add_argument("--force", action="store_true", help="replace an existing audit queue")
     sub.add_parser("kappa", help="Cohen's kappa per criterion, Gemini vs. the audit")
     args = parser.parse_args()
 
     data_dir = config.data_dir()
-    review_dir = data_dir / "review"
+    reviews = review_dir(data_dir)
+    pilot = out_dir(data_dir) / "pilot.json"
     if args.command == "run":
+        if args.limit is None and not pilot.exists() and not args.skip_pilot:
+            parser.error(
+                "measure real tokens first (spec §4.1 T4): run with --limit 100 and check the "
+                "projected cost, or pass --skip-pilot"
+            )
         from pipeline.gemini.sdk import client_from_env
 
         summary = run_labeling(
-            data_dir, client_from_env(), n=args.n, seed=args.seed, limit=args.limit
+            data_dir,
+            client_from_env(),
+            n=args.n,
+            seed=args.seed,
+            limit=args.limit,
+            retry_failed=args.retry_failed,
         )
         log.info(
-            "%d requested, %d labeled, %d failed | %.0f in + %.0f out tokens/image | "
-            "$%.4f paid now | $%.6f/image → $%.2f for %d images",
+            "%d requested, %d labeled, %d failed, %d earlier failures skipped | "
+            "%.0f in + %.0f out tokens/image | $%.4f paid now | $%.6f/image → $%.2f for %d images",
             summary.requested,
             summary.labeled,
             summary.failed,
+            summary.skipped_failed,
             summary.input_tokens_per_image,
             summary.output_tokens_per_image,
             summary.usd,
@@ -339,17 +420,18 @@ def main() -> None:
             summary.usd_per_image * args.n,
             args.n,
         )
-        atomic_write_text(out_dir(data_dir) / "run.json", json.dumps(asdict(summary), indent=2))
+        report = pilot if args.limit is not None else out_dir(data_dir) / "run.json"
+        atomic_write_text(report, json.dumps(asdict(summary), indent=2))
     elif args.command == "audit-queue":
-        if (review_dir / "queues" / f"{AUDIT_QUEUE}.jsonl").exists() and not args.force:
+        if queue_path(reviews, AUDIT_QUEUE).exists() and not args.force:
             parser.error(f"queue {AUDIT_QUEUE} exists (its decisions are kept); pass --force")
         labels = pl.read_parquet(labels_path(data_dir))
-        ids = audit_sample(labels, n=args.n, seed=args.seed, per_positive=args.per_positive)
-        log.info(
-            "Wrote %d items to %s", len(ids), write_audit_queue(data_dir, review_dir, image_ids=ids)
-        )
+        audit = audit_sample(labels, n=args.n, seed=args.seed, per_positive=args.per_positive)
+        atomic_write(audit_ids_path(data_dir), audit.write_parquet)
+        path = write_audit_queue(data_dir, reviews, image_ids=audit["image_id"].to_list())
+        log.info("Wrote %d items to %s\n%s", audit.height, path, audit["stratum"].value_counts())
     else:
-        table = kappa_table(data_dir, review_dir)
+        table = kappa_table(data_dir, reviews)
         atomic_write(out_dir(data_dir) / "kappa.parquet", table.write_parquet)
         atomic_write_text(out_dir(data_dir) / "kappa.json", json.dumps(table.to_dicts(), indent=2))
         with pl.Config(tbl_hide_dataframe_shape=True, tbl_rows=-1, float_precision=3):

@@ -99,7 +99,7 @@ embed-bench: ## Images/s per batch size for EMBED_MODEL on this GPU
 	$(UV) run python -m pipeline.embed bench
 
 gemini-label: ## Gemini moderation labels for 5k images (paid, Batch API); pilot: python -m pipeline.gemini_label run --limit 100
-	$(UV) run python -m pipeline.gemini_label run
+	$(UV) run python -m pipeline.gemini_label run  # refuses until the pilot (--limit 100) has run
 
 review: build-web ## Serve the /review tool on http://127.0.0.1:8765/review (queues: python -m pipeline.review queue …)
 	$(UV) run python -m pipeline.review serve

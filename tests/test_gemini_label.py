@@ -13,6 +13,7 @@ from pipeline.gemini_label import (
     CRITERIA,
     STEP,
     ModerationLabel,
+    audit_ids_path,
     audit_sample,
     build_request,
     cohen_kappa,
@@ -189,6 +190,35 @@ def test_pilot_then_full_run_pays_only_once(data_dir: Path, tmp_path: Path) -> N
     assert set(ledger["step"]) == {STEP}
 
 
+def test_failures_are_not_repaid_unless_retried(data_dir: Path, tmp_path: Path) -> None:
+    transport = FakeTransport({b"img5": "TRUNCATED"})
+    client = _client(tmp_path, transport)
+    run_labeling(data_dir, client, n=40, seed=0)
+
+    again = run_labeling(data_dir, client, n=40, seed=0)
+    assert again.skipped_failed == 1 and again.usd == 0  # the rest are cache hits
+    assert len(transport.batches) == 1
+
+    retried = run_labeling(data_dir, client, n=40, seed=0, retry_failed=True)
+    assert [len(b) for b in transport.batches] == [40, 1]
+    assert retried.failed == 1
+
+
+def test_a_small_run_after_the_full_run_keeps_every_label(data_dir: Path, tmp_path: Path) -> None:
+    client = _client(tmp_path, FakeTransport())
+    run_labeling(data_dir, client, n=40, seed=0)
+    run_labeling(data_dir, client, n=40, seed=0, limit=5)
+
+    assert pl.read_parquet(labels_path(data_dir)).height == 40
+
+
+def test_sample_keeps_entities_without_a_branch(data_dir: Path) -> None:
+    entities = data_dir / "ingest" / "entities.parquet"
+    pl.read_parquet(entities).with_columns(branch=pl.lit(None, pl.String)).write_parquet(entities)
+
+    assert sample_images(data_dir, n=10, seed=0).height == 10
+
+
 def test_long_format_labels_for_training(data_dir: Path, tmp_path: Path) -> None:
     run_labeling(data_dir, _client(tmp_path, FakeTransport()), n=4, seed=0)
 
@@ -204,10 +234,28 @@ def test_audit_sample_enriches_rare_positives(data_dir: Path, tmp_path: Path) ->
     run_labeling(data_dir, _client(tmp_path, FakeTransport(answers)), n=40, seed=0)
     labels = pl.read_parquet(labels_path(data_dir))
 
-    ids = audit_sample(labels, n=10, seed=0, per_positive=5)
+    audit = audit_sample(labels, n=10, seed=0, per_positive=5)
 
+    ids = audit["image_id"].to_list()
     assert len(ids) == len(set(ids)) == 10
-    assert {7, 8} <= set(ids)
+    strata = dict(audit.iter_rows())
+    assert (strata[7], strata[8]) == ("positive:nsfw", "positive:political")
+    assert sum(v == "random" for v in strata.values()) == 8
+
+
+def test_audit_gives_every_rare_criterion_a_share(data_dir: Path, tmp_path: Path) -> None:
+    # 20 watermark positives would fill a small audit on their own
+    answers = {f"img{i}".encode(): _answer(watermark=True) for i in range(1, 21)}
+    answers[b"img30"] = _answer(violence=True)
+    answers[b"img31"] = _answer(relevance="unsure")  # not a relevance positive
+    run_labeling(data_dir, _client(tmp_path, FakeTransport(answers)), n=40, seed=0)
+    labels = pl.read_parquet(labels_path(data_dir))
+
+    strata = dict(audit_sample(labels, n=12, seed=0, per_positive=40).iter_rows())
+
+    assert sum(v == "positive:watermark" for v in strata.values()) == 2  # 12 // 6 criteria
+    assert strata[30] == "positive:violence"
+    assert strata.get(31) != "positive:relevance"
 
 
 def test_cohen_kappa() -> None:
@@ -243,6 +291,9 @@ def test_kappa_table_against_the_human_audit(data_dir: Path, tmp_path: Path) -> 
             )
         )
 
+    pl.DataFrame(
+        {"image_id": [1, 2, 3, 4], "stratum": ["positive:watermark"] * 2 + ["random"] * 2}
+    ).write_parquet(audit_ids_path(data_dir))
     table = kappa_table(data_dir, review, "gemini-audit")
 
     row = table.filter(pl.col("criterion") == "watermark").row(0, named=True)
@@ -251,3 +302,10 @@ def test_kappa_table_against_the_human_audit(data_dir: Path, tmp_path: Path) -> 
     shot = table.filter(pl.col("criterion") == "shot_type").row(0, named=True)
     assert shot["agreement"] == 0.0  # Gemini PHONG_CANH vs human CHECKIN
     assert set(table["criterion"]) == set(CRITERIA)
+    assert row["n_random"] == 1  # image 3; image 4 was unsure
+    assert shot["gemini_positive"] is None  # multi-class
+
+    # a re-run of ingest that changes an image's entity must not be compared silently
+    labels = pl.read_parquet(labels_path(data_dir))
+    labels.with_columns(entity_id=pl.lit("e9")).write_parquet(labels_path(data_dir))
+    assert kappa_table(data_dir, review, "gemini-audit")["n"].sum() == 0

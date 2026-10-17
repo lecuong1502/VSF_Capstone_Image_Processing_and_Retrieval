@@ -98,6 +98,10 @@ MODERATION_FIELDS = [
 ]
 
 
+def review_dir(data_dir: Path) -> Path:
+    return data_dir / "review"
+
+
 def queue_path(review_dir: Path, name: str, kind: str = "queues") -> Path:
     if not _QUEUE_NAME.match(name):
         raise ValueError(f"invalid queue name {name!r}")
