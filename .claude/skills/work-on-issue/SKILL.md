@@ -1,6 +1,6 @@
 ---
 name: work-on-issue
-description: End-to-end workflow for implementing a GitHub issue in this repo – check dependencies, branch, implement test-first, verify, open the PR and update the project board. Use when the user asks to work on, implement, start or pick up an issue/ticket (e.g. "làm #6", "implement #3", "next ticket").
+description: End-to-end workflow for implementing a GitHub issue in this repo – check dependencies, branch, implement test-first, verify, open the PR and update the project board. Use when the user asks to work on, implement, start or pick up an issue/ticket (e.g. "work on #6", "implement #3", "next ticket", or the same requests in Vietnamese).
 ---
 
 Follow these steps in order. Chat with the user in Vietnamese; everything written to the repo or GitHub is in English (see `CLAUDE.md`).

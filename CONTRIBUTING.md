@@ -51,8 +51,8 @@ Requirements: Python 3.12, [uv](https://github.com/astral-sh/uv), Go (latest sta
 git clone https://github.com/lecuong1502/VSF_Capstone_Image_Processing_and_Retrieval.git
 cd VSF_Capstone_Image_Processing_and_Retrieval
 cp .env.example .env          # set RAW_DATA_DIR, GEMINI_API_KEY, ... (never commit .env)
-make setup                    # install dependencies + download ONNX weights
-pre-commit install            # lint/format hooks
+make setup                    # create .env + install dependencies (ONNX weights download arrives with #11)
+pre-commit install            # lint/format hooks (config arrives with #3)
 make lint test                # must pass before opening a PR
 ```
 
@@ -87,7 +87,7 @@ docker compose -f deploy/docker-compose.yml up -d
   ```
 
   `type`: `feat`, `fix`, `perf`, `refactor`, `test`, `docs`, `build`, `ci`, `chore`.
-  Suggested `scope`: `web`, `gateway`, `search`, `pipeline`, `moderation`, `eval`, `bench`, `deploy`, `docs`.
+  Suggested `scope`: `web`, `gateway`, `search`, `pipeline`, `moderation`, `eval`, `bench`, `deploy`, `infra`, `docs`.
 
 - Keep commits small and meaningful. Rebase onto `main` before requesting review; PRs are **squash-merged**.
 

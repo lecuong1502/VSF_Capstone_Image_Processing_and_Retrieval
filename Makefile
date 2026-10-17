@@ -1,43 +1,41 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
-SEARCH_DIR := services/search
-UV_SEARCH := env -u VIRTUAL_ENV uv run --directory $(SEARCH_DIR)
-EXPORT := uv export --quiet --frozen --no-hashes --no-emit-project --all-groups
+# uv projects: the root (pipeline + eval) and the standalone search-api.
+PROJECTS := . services/search
+# Ignore any activated virtualenv so each project always uses its own .venv.
+UV := env -u VIRTUAL_ENV uv
+EXPORT := $(UV) export --quiet --frozen --no-hashes --all-groups
 
 .PHONY: help setup requirements lint fmt test pipeline restore eval loadtest
 
 help: ## List available targets
-	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-10s %s\n", $$1, $$2}'
+	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-14s %s\n", $$1, $$2}'
 
-setup: ## Install Python dependencies (root project + search-api)
+setup: ## Create .env and install Python dependencies for all projects
 	@test -f .env || { cp .env.example .env && echo "Created .env from .env.example – fill in your values."; }
-	uv sync
-	env -u VIRTUAL_ENV uv sync --directory $(SEARCH_DIR)
+	@for p in $(PROJECTS); do $(UV) sync --directory $$p || exit 1; done
+	@echo "ONNX weights are not downloaded yet – added with #11."
 
 requirements: ## Regenerate requirements.txt files from uv.lock (run after uv add/remove)
-	$(EXPORT) -o requirements.txt
-	env -u VIRTUAL_ENV $(EXPORT) --directory $(SEARCH_DIR) -o requirements.txt
+	@for p in $(PROJECTS); do $(EXPORT) --directory $$p -o requirements.txt || exit 1; done
 
-lint: ## Ruff (lint + format check), mypy, requirements.txt in sync with uv.lock
-	@diff -q <($(EXPORT) | grep -v '^#') <(grep -v '^#' requirements.txt) >/dev/null || { echo "requirements.txt is stale – run: make requirements"; exit 1; }
-	@diff -q <(env -u VIRTUAL_ENV $(EXPORT) --directory $(SEARCH_DIR) | grep -v '^#') <(grep -v '^#' $(SEARCH_DIR)/requirements.txt) >/dev/null || { echo "$(SEARCH_DIR)/requirements.txt is stale – run: make requirements"; exit 1; }
-	uv run ruff check .
-	uv run ruff format --check .
-	uv run mypy
-	$(UV_SEARCH) ruff check .
-	$(UV_SEARCH) ruff format --check .
-	$(UV_SEARCH) mypy
+lint: ## Lockfiles + requirements.txt in sync, ruff (lint + format check), mypy
+	@for p in $(PROJECTS); do \
+	  $(UV) lock --quiet --check --directory $$p || { echo "$$p/uv.lock is stale – run: uv lock --directory $$p"; exit 1; }; \
+	  diff -q <($(EXPORT) --directory $$p | grep -v '^#') <(grep -v '^#' $$p/requirements.txt) >/dev/null \
+	    || { echo "$$p/requirements.txt is stale – run: make requirements"; exit 1; }; \
+	done
+	$(UV) run ruff check .
+	$(UV) run ruff format --check .
+	@for p in $(PROJECTS); do $(UV) run --directory $$p mypy || exit 1; done
 
 fmt: ## Auto-format and auto-fix lint issues
-	uv run ruff format .
-	uv run ruff check --fix .
-	$(UV_SEARCH) ruff format .
-	$(UV_SEARCH) ruff check --fix .
+	$(UV) run ruff format .
+	$(UV) run ruff check --fix .
 
 test: ## Run unit tests
-	uv run pytest
-	$(UV_SEARCH) pytest
+	@for p in $(PROJECTS); do $(UV) run --directory $$p pytest || exit 1; done
 
 pipeline: ## Run the offline pipeline (ingest → … → index)
 	@echo "Not implemented yet – see milestones M1/M2 (#6 onwards)." && exit 1

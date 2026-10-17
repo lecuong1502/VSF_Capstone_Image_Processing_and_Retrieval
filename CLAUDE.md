@@ -20,23 +20,25 @@ Vietnamese travel image moderation (cascade "embed once, use many") and hybrid r
 ```text
 apps/web/            React + Vite + TS (search UI, /review tool)
 services/gateway/    Go gateway (distroless)
-services/search/     FastAPI search-api – standalone uv project with its own uv.lock (built into Docker)
+services/search/     FastAPI search-api – standalone uv project with its own uv.lock (built into Docker);
+                     code lives in the `app/` package (spec §9's router/hybrid/rerank/kg/llm modules go there,
+                     matching the Dockerfile's `uvicorn app.main:app`)
 pipeline/            offline pipeline package (root uv project)
 eval/                evaluation package (root uv project)
 tests/               tests for pipeline/ and eval/
 bench/ loadtest/k6/  benchmarks, k6 scripts
 deploy/              docker-compose, prometheus
 docs/                architecture, performance, slides
-data/sample/         only committed data: ~50 landmark-only rows, no annotator columns
+data/sample/         the only committed data – planned in #7: ~50 landmark-only rows, no annotator columns
 ```
 
 ## Commands
 
 ```bash
-make setup      # uv sync for the root project and services/search
-make lint       # ruff check + ruff format --check + mypy
-make test       # pytest
-make fmt        # ruff format + ruff check --fix
+make setup         # create .env, uv sync both projects
+make lint          # uv.lock + requirements.txt in sync, ruff check + format --check (whole repo), mypy (per project)
+make test          # pytest (per project)
+make fmt           # ruff format + ruff check --fix
 make requirements  # regenerate requirements.txt files from uv.lock (lint fails if stale)
 ```
 
