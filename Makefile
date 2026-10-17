@@ -10,7 +10,7 @@ GATEWAY := services/gateway
 WEB := apps/web
 
 .PHONY: help setup sync requirements lint lint-py lint-go lint-web fmt test test-py test-go build-web \
-	pipeline restore eval loadtest
+	gemini-cost gemini-smoke pipeline restore eval loadtest
 
 help: ## List available targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-14s %s\n", $$1, $$2}'
@@ -64,6 +64,12 @@ test-go: ## go test for the gateway
 
 build-web: ## Type-check and build the web app
 	cd $(WEB) && npm run build
+
+gemini-cost: ## Print Gemini spend per step vs GEMINI_BUDGET_USD
+	$(UV) run python -m pipeline.gemini cost
+
+gemini-smoke: ## One real Gemini call (~$0.0001) to check the key, logging and pricing
+	$(UV) run python -m pipeline.gemini smoke
 
 pipeline: ## Run the offline pipeline (ingest → … → index)
 	@echo "Not implemented yet – see milestones M1/M2 (#6 onwards)." && exit 1
