@@ -5,6 +5,9 @@ Rates are computed over labeled (image, entity) pairs, excluding `unlabeled` and
 pairs, with 95% Wilson intervals so small groups are not over-read. Rule thresholds for the
 cascade are meant to be chosen from these numbers, not guessed.
 
+The dead-link rate (also asked for in §2.2) needs the downloads and is added to this report by
+the download step (#9).
+
 Usage: python -m pipeline.profile [--ingest-dir DIR] [--out reports/data_profile.html]
 """
 
@@ -14,6 +17,7 @@ import argparse
 import html
 import logging
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -26,10 +30,18 @@ log = logging.getLogger(__name__)
 
 SIZE_BUCKETS = ((300, "<300"), (500, "300–499"), (800, "500–799"), (1200, "800–1199"))
 SIZE_ORDER = [label for _, label in SIZE_BUCKETS] + ["≥1200", "unknown"]
+# width / height
+ASPECT_BUCKETS = ((0.5, "tall <1:2"), (0.8, "portrait"), (1.25, "square-ish"), (2.0, "landscape"))
+ASPECT_ORDER = [label for _, label in ASPECT_BUCKETS] + ["wide >2:1", "unknown"]
 FEW_YES_THRESHOLD = 5  # spec §2.1: entities with < 5 relevant images fall back to text-only
+YES_PER_ENTITY_BUCKETS = ((1, "0"), (5, "1–4"), (10, "5–9"), (20, "10–19"), (50, "20–49"))
+YES_PER_ENTITY_ORDER = [label for _, label in YES_PER_ENTITY_BUCKETS] + ["≥50"]
 TOP_SOURCES = 25
-MIN_SOURCE_N = 100  # only rank sources with enough labeled pairs for a stable rate
+MIN_SOURCE_N = 100  # only rank domains with enough labeled pairs for a stable rate
 Z_95 = 1.959964
+
+# A label usable as ground truth: yes/no and not conflicting between exports.
+CLEAN_LABEL = pl.col("value").is_in(["yes", "no"]) & ~pl.col("label_conflict")
 
 
 def wilson(successes: int, n: int, z: float = Z_95) -> tuple[float, float]:
@@ -43,21 +55,39 @@ def wilson(successes: int, n: int, z: float = Z_95) -> tuple[float, float]:
     return max(0.0, centre - half), min(1.0, centre + half)
 
 
+def _bucket(value: float, buckets: tuple[tuple[float, str], ...], last: str) -> str:
+    for upper, label in buckets:
+        if value < upper:
+            return label
+    return last
+
+
 def size_bucket(width: int | None, height: int | None) -> str:
     """Bucket by the declared short side (what matters for thumbnails and embeddings)."""
     if width is None or height is None:
         return "unknown"
-    short = min(width, height)
-    for upper, label in SIZE_BUCKETS:
-        if short < upper:
-            return label
-    return "≥1200"
+    return _bucket(min(width, height), SIZE_BUCKETS, "≥1200")
+
+
+def aspect_bucket(width: int | None, height: int | None) -> str:
+    """Bucket by width / height; extreme ratios are typical of banners and screenshots."""
+    if not width or not height:
+        return "unknown"
+    return _bucket(width / height, ASPECT_BUCKETS, "wide >2:1")
+
+
+def normalize_domain(source: str | None) -> str | None:
+    """Merge `www.` variants and case so one site is one group."""
+    if source is None:
+        return None
+    domain = source.strip().lower()
+    return domain.removeprefix("www.")
 
 
 def verify_rates(labeled: pl.DataFrame, group: str) -> pl.DataFrame:
     """n, yes count, yes rate and Wilson interval per `group`, over clean yes/no labels."""
     counts = (
-        labeled.filter(pl.col("value").is_in(["yes", "no"]) & ~pl.col("label_conflict"))
+        labeled.filter(CLEAN_LABEL)
         .group_by(pl.col(group).fill_null("unknown"))
         .agg(pl.len().alias("n"), (pl.col("value") == "yes").sum().alias("yes"))
     )
@@ -73,30 +103,56 @@ def verify_rates(labeled: pl.DataFrame, group: str) -> pl.DataFrame:
 class Profile:
     overview: dict[str, int]
     rates: dict[str, pl.DataFrame]
+    distributions: dict[str, pl.DataFrame]
+    short_side_quantiles: dict[str, float]
     few_yes: pl.DataFrame
 
 
+def _apply(fn: Callable[[int | None, int | None], str], *columns: str) -> pl.Expr:
+    """Row-wise `fn` over `columns` (keeps the tested pure bucket functions the single source)."""
+    return pl.struct(*columns).map_elements(
+        lambda row: fn(*(row[c] for c in columns)), return_dtype=pl.String
+    )
+
+
 def build_profile(images: pl.DataFrame, labels: pl.DataFrame, entities: pl.DataFrame) -> Profile:
-    sized = images.with_columns(
-        pl.struct("declared_w", "declared_h")
-        .map_elements(
-            lambda s: size_bucket(s["declared_w"], s["declared_h"]), return_dtype=pl.String
-        )
-        .alias("size")
+    images = images.with_columns(
+        _apply(size_bucket, "declared_w", "declared_h").alias("size"),
+        _apply(aspect_bucket, "declared_w", "declared_h").alias("aspect"),
+        pl.col("image_source")
+        .map_elements(normalize_domain, return_dtype=pl.String)
+        .alias("domain"),
     )
     labeled = labels.join(
-        sized.select("image_id", "size", "image_source"), on="image_id", how="left"
+        images.select("image_id", "size", "aspect", "domain"), on="image_id", how="left"
     ).join(entities.select("entity_id", "branch", "priority"), on="entity_id", how="left")
 
     rates = {
         "size": _order(verify_rates(labeled, "size"), "size", SIZE_ORDER),
-        "source": verify_rates(labeled, "image_source"),
+        "aspect": _order(verify_rates(labeled, "aspect"), "aspect", ASPECT_ORDER),
+        "domain": verify_rates(labeled, "domain"),
         "query_type": verify_rates(labeled, "query_type"),
         "branch": verify_rates(labeled, "branch").sort("branch"),
         "priority": verify_rates(labeled, "priority").sort("priority"),
     }
-    clean = labels.filter(pl.col("value").is_in(["yes", "no"]) & ~pl.col("label_conflict"))
-    per_entity = clean.group_by("entity_id").agg(pl.len().alias("n_labeled"))
+
+    yes_bucket = (
+        entities["n_yes_images"]
+        .map_elements(lambda n: _bucket(n, YES_PER_ENTITY_BUCKETS, "≥50"), return_dtype=pl.String)
+        .alias("bucket")
+    )
+    distributions = {
+        "size": _counts(images["size"], "images", SIZE_ORDER),
+        "aspect": _counts(images["aspect"], "images", ASPECT_ORDER),
+        "yes_per_entity": _counts(yes_bucket, "entities", YES_PER_ENTITY_ORDER),
+    }
+    short_side = images.select(pl.min_horizontal("declared_w", "declared_h")).to_series()
+    short_side_quantiles = {
+        f"p{int(q * 100):02d}": float(short_side.quantile(q) or 0)
+        for q in (0.01, 0.05, 0.25, 0.5, 0.75, 0.95)
+    }
+
+    per_entity = labels.filter(CLEAN_LABEL).group_by("entity_id").agg(pl.len().alias("n_labeled"))
     few_yes = (
         entities.filter(pl.col("n_yes_images") < FEW_YES_THRESHOLD)
         .join(per_entity, on="entity_id", how="left")
@@ -125,7 +181,13 @@ def build_profile(images: pl.DataFrame, labels: pl.DataFrame, entities: pl.DataF
         ),
         "entities_few_yes": few_yes.height,
     }
-    return Profile(overview=overview, rates=rates, few_yes=few_yes)
+    return Profile(overview, rates, distributions, short_side_quantiles, few_yes)
+
+
+def _counts(values: pl.Series, unit: str, order: list[str]) -> pl.DataFrame:
+    """Count of `unit` per bucket, in `order`, including empty buckets."""
+    counts = dict(values.value_counts().rows())
+    return pl.DataFrame({"bucket": order, unit: [counts.get(b, 0) for b in order]})
 
 
 def _order(frame: pl.DataFrame, column: str, order: list[str]) -> pl.DataFrame:
@@ -218,6 +280,24 @@ def _rate_table(frame: pl.DataFrame, key: str, title: str, note: str) -> str:
     )
 
 
+def _count_table(frame: pl.DataFrame, unit: str, title: str, note: str) -> str:
+    total = max(int(frame[unit].sum()), 1)
+    peak = max(int(frame.select(pl.col(unit).max()).item() or 0), 1)
+    rows = "".join(
+        f'<tr class="bar-row" title="{html.escape(str(r["bucket"]))}: {r[unit]:,} {unit} '
+        f'({_pct(r[unit] / total)})"><td class="label">{html.escape(str(r["bucket"]))}</td>'
+        f'<td><div class="track"><div class="bar" style="width:{100 * r[unit] / peak:.2f}%">'
+        f'</div></div></td><td class="num">{r[unit]:,}</td>'
+        f'<td class="num">{_pct(r[unit] / total)}</td></tr>'
+        for r in frame.iter_rows(named=True)
+    )
+    return (
+        f"<section><h2>{html.escape(title)}</h2><p class=note>{html.escape(note)}</p>"
+        f'<div class="wrap"><table><thead><tr><th>Bucket</th><th>{unit} (bar)</th>'
+        f"<th>{unit}</th><th>share</th></tr></thead><tbody>{rows}</tbody></table></div></section>"
+    )
+
+
 def render_html(profile: Profile) -> str:
     o = profile.overview
     tiles = [
@@ -236,28 +316,38 @@ def render_html(profile: Profile) -> str:
         f'<div class="tile"><div class="v">{v:,}</div><div class="k">{html.escape(k)}</div></div>'
         for k, v in tiles
     )
-    sources = profile.rates["source"].head(TOP_SOURCES)
+    domains = profile.rates["domain"]
     rates_note = "Share of yes among labeled pairs (unlabeled and conflicting pairs excluded)."
+    q = profile.short_side_quantiles
+    quantiles = ", ".join(f"{k} {v:,.0f}px" for k, v in q.items())
     sections = [
+        _count_table(
+            profile.distributions["size"],
+            "images",
+            "Image size distribution (declared short side, px)",
+            f"Every image once (labeled or not). Short-side quantiles: {quantiles}. "
+            "Declared sizes come from the crawl and are re-measured after download (#9).",
+        ),
+        _rate_table(profile.rates["size"], "size", "Declared size (short side, px)", rates_note),
+        _count_table(
+            profile.distributions["aspect"],
+            "images",
+            "Aspect ratio distribution (width / height)",
+            "Every image once. Extreme ratios are typical of banners and screenshots.",
+        ),
+        _rate_table(profile.rates["aspect"], "aspect", "Aspect ratio", rates_note),
         _rate_table(
-            profile.rates["size"],
-            "size",
-            "Declared size (short side, px)",
-            rates_note + " Declared size from the crawl; re-measured after download (#9).",
+            domains.head(TOP_SOURCES),
+            "domain",
+            f"Domain (top {min(TOP_SOURCES, domains.height)} of {domains.height} by volume)",
+            rates_note + " image_source lower-cased with www. removed.",
         ),
         _rate_table(
-            sources,
-            "image_source",
-            f"Image source (top {len(sources)} of {profile.rates['source'].height} by volume)",
-            rates_note,
-        ),
-        _rate_table(
-            profile.rates["source"]
-            .filter(pl.col("n") >= MIN_SOURCE_N)
-            .sort("yes_rate", "image_source")
+            domains.filter(pl.col("n") >= MIN_SOURCE_N)
+            .sort("yes_rate", "domain")
             .head(TOP_SOURCES),
-            "image_source",
-            f"Lowest yes rate sources (n ≥ {MIN_SOURCE_N})",
+            "domain",
+            f"Lowest yes rate domains (n ≥ {MIN_SOURCE_N})",
             rates_note + " Candidates for URL/domain rules in the cascade's first stage.",
         ),
         _rate_table(profile.rates["query_type"], "query_type", "Query type", rates_note),
@@ -278,6 +368,14 @@ def render_html(profile: Profile) -> str:
         f"<td>{html.escape(str(r['branch']))}</td><td>{html.escape(str(r['priority']))}</td>"
         f'<td class="num">{r["n_yes_images"]}</td><td class="num">{r["n_labeled"]}</td></tr>'
         for r in few.head(50).iter_rows(named=True)
+    )
+    sections.append(
+        _count_table(
+            profile.distributions["yes_per_entity"],
+            "entities",
+            "Relevant images per entity",
+            "Number of non-conflicting yes images per entity (all entities).",
+        )
     )
     sections.append(
         f"<section><h2>Entities with fewer than {FEW_YES_THRESHOLD} relevant images</h2>"
@@ -314,9 +412,10 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    tables = {n: pl.read_parquet(args.ingest_dir / f"{n}.parquet") for n in ("images", "labels")}
+    images = pl.read_parquet(args.ingest_dir / "images.parquet")
+    labels = pl.read_parquet(args.ingest_dir / "labels.parquet")
     entities = pl.read_parquet(args.ingest_dir / "entities.parquet")
-    profile = build_profile(tables["images"], tables["labels"], entities)
+    profile = build_profile(images, labels, entities)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(render_html(profile), encoding="utf-8")
     log.info("Wrote %s", args.out)

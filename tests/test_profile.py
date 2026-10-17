@@ -6,7 +6,15 @@ import polars as pl
 import pytest
 
 from pipeline.ingest import ingest
-from pipeline.profile import build_profile, render_html, size_bucket, verify_rates, wilson
+from pipeline.profile import (
+    aspect_bucket,
+    build_profile,
+    normalize_domain,
+    render_html,
+    size_bucket,
+    verify_rates,
+    wilson,
+)
 
 
 def test_wilson_interval() -> None:
@@ -54,7 +62,7 @@ def test_profile_on_the_committed_sample() -> None:
 
     assert profile.overview["images"] == sample.images.height
     assert profile.overview["labeled_pairs"] == 35  # 41 pairs - 6 unlabeled
-    for table in ("size", "source", "query_type", "branch", "priority"):
+    for table in ("size", "aspect", "domain", "query_type", "branch", "priority"):
         rates = profile.rates[table]
         assert rates["n"].sum() == 32  # labeled pairs without the 3 conflicts
     assert profile.few_yes["entity_id"].n_unique() == profile.few_yes.height
@@ -68,8 +76,10 @@ def test_html_report_has_every_section() -> None:
     assert html.startswith("<!doctype html>")
     for heading in (
         "Declared size",
-        "Image source",
-        "Lowest yes rate sources",
+        "Domain",
+        "Lowest yes rate domains",
+        "Aspect ratio",
+        "Relevant images per entity",
         "Query type",
         "Branch",
         "Priority",
@@ -77,3 +87,39 @@ def test_html_report_has_every_section() -> None:
     ):
         assert heading in html
     assert "prefers-color-scheme: dark" in html
+
+
+@pytest.mark.parametrize(
+    ("source", "domain"),
+    [("www.qdnd.vn", "qdnd.vn"), ("QDND.vn", "qdnd.vn"), ("vi.wikipedia.org", "vi.wikipedia.org")],
+)
+def test_domain_merges_www_and_case(source: str, domain: str) -> None:
+    assert normalize_domain(source) == domain
+
+
+@pytest.mark.parametrize(
+    ("w", "h", "bucket"),
+    [
+        (1000, 400, "wide >2:1"),
+        (1600, 900, "landscape"),
+        (800, 800, "square-ish"),
+        (600, 900, "portrait"),
+        (300, 900, "tall <1:2"),
+        (None, 5, "unknown"),
+    ],
+)
+def test_aspect_bucket(w: int | None, h: int | None, bucket: str) -> None:
+    assert aspect_bucket(w, h) == bucket
+
+
+def test_profile_has_image_level_distributions() -> None:
+    sample = ingest(Path(__file__).resolve().parents[1] / "data" / "sample")
+
+    profile = build_profile(sample.images, sample.labels, sample.entities)
+
+    # Image-level counts: every image once, labeled or not.
+    assert profile.distributions["size"]["images"].sum() == sample.images.height
+    assert profile.distributions["aspect"]["images"].sum() == sample.images.height
+    assert profile.distributions["yes_per_entity"]["entities"].sum() == sample.entities.height
+    assert {"p05", "p50", "p95"} <= set(profile.short_side_quantiles)
+    assert "aspect" in profile.rates
