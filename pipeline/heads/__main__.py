@@ -41,7 +41,8 @@ def main() -> None:
             "recall@reject": r.get("reject", {}).get("recall"),
             "pr_auc": r.get("pr_auc"),
             "ece": r.get("ece"),
-            "escalation": r.get("escalation_rate"),
+            "recall_kept@low": r.get("recall_kept_by_low"),
+            "escalation": r.get("escalation_share"),
         }
         for name, r in report["heads"].items()
     ]

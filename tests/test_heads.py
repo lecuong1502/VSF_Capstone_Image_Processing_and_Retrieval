@@ -17,7 +17,13 @@ from pipeline.heads.linear import (
     fit_softmax_head,
     load_head,
 )
-from pipeline.heads.metrics import bootstrap_prf, expected_calibration_error, pick_thresholds
+from pipeline.heads.metrics import (
+    BudgetCurve,
+    allocate_escalation,
+    bootstrap_prf,
+    expected_calibration_error,
+    pick_thresholds,
+)
 from pipeline.heads.relevance import relevance_features
 from pipeline.heads.train import scores_path, train_heads
 
@@ -50,6 +56,42 @@ def test_thresholds_without_a_precise_region_reject_nothing() -> None:
 
     assert t.high == np.inf  # never auto-reject; everything above low escalates
     assert t.low < 0.5
+
+
+def _curve(rng: np.random.Generator, separation: float, high: float = np.inf) -> BudgetCurve:
+    y = rng.random(5000) < 0.2
+    p = 1 / (1 + np.exp(-(rng.normal(size=5000) + separation * y - 1)))
+    keys = np.where(p < high, p, -np.inf)
+    return BudgetCurve(keys=keys, cal_positive_p=p[y][:500], high=high)
+
+
+def test_escalation_budget_is_spent_where_it_buys_recall() -> None:
+    rng = np.random.default_rng(0)
+    curves = {"easy": _curve(rng, 4.0), "hard": _curve(rng, 0.5), "fixed": _curve(rng, 1.0)}
+    curves["fixed"] = BudgetCurve(
+        curves["fixed"].keys, curves["fixed"].cal_positive_p, np.inf, fixed_share=0.01
+    )
+
+    alloc = allocate_escalation(curves, budget=0.05, step=0.0025, target_recall=0.98)
+
+    shares = {n: float(np.mean(c.keys > alloc[n].low)) for n, c in curves.items()}
+    assert sum(shares.values()) <= 0.05 + 0.003
+    assert shares["fixed"] == pytest.approx(0.01, abs=0.002)
+    # the separable head buys more recall per escalated image, so it gets more of the budget
+    assert shares["easy"] > shares["hard"]
+    assert alloc["easy"].recall > alloc["hard"].recall
+
+
+def test_escalation_stops_at_the_recall_target() -> None:
+    rng = np.random.default_rng(1)
+    curves = {"perfect": _curve(rng, 12.0)}
+
+    alloc = allocate_escalation(curves, budget=0.5, step=0.0025, target_recall=0.98)
+
+    assert alloc["perfect"].recall >= 0.98
+    assert (
+        float(np.mean(curves["perfect"].keys > alloc["perfect"].low)) < 0.3
+    )  # did not spend it all
 
 
 def test_bootstrap_prf_contains_the_point_estimate() -> None:
@@ -308,10 +350,14 @@ def test_train_heads_end_to_end(data_dir: Path) -> None:
     assert heads["nsfw"]["truth"] == "none"  # no positives anywhere: zero-shot, unevaluated
     assert heads["nsfw"]["tau_high"] == float("inf")  # zero-shot heads never auto-reject
     assert heads["political"]["model"] == "zero-shot"  # ~20 Gemini positives < MIN_POSITIVES
-    assert wm["recall_kept_by_low"] >= 0.9
+    # the escalation band can only add recall to what the auto-reject threshold catches
+    assert wm["recall_kept_by_low"] >= wm["reject"]["recall"][0]
+    shares = [h["escalation_share"] for h in heads.values() if "escalation_share" in h]
+    assert sum(shares) <= report["escalation_budget"] + 1e-9
     assert sum(wm["confusion"].values()) == wm["n_test"]
     assert all(n > 0 for _, _, n in wm["reliability"])
-    assert 0 <= report["escalation_rate"] <= 1
+    assert report["escalation_rate"] <= report["escalation_budget"] + 0.01
+    assert wm["escalation_share"] <= report["escalation_budget"]
 
     version = report["model_version"]
     assert version.startswith("org--tiny-clip.")
